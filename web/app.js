@@ -142,8 +142,16 @@ function toast(msg, bad) {
   el._t = setTimeout(() => el.classList.remove('show'), 3200);
 }
 
+// 后端地址（默认空 = 同源相对路径，本地和整站部署都走这里）：
+//   整站部署（本地 / Render）      → 留空即可
+//   前端放 GitHub Pages、后端在别处 → 在 index.html 的
+//                                    <meta name="lht-api-base" content="https://xxx.onrender.com">
+//                                    里填后端地址，这里会自动前缀上。
+const API_BASE = (((document.querySelector('meta[name="lht-api-base"]') || {}).content) || '')
+  .trim().replace(/\/+$/, '');
+
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  const res = await fetch(API_BASE + path, opts);
   return res.json();
 }
 
@@ -1718,7 +1726,9 @@ async function saveSettings() {
     state.settings = { ...(state.store.settings || {}) };
     invalidate('overview'); invalidate('hot'); invalidate('limitup');
     if (warn.length) toast('已保存，但 ' + warn.join('；'), true);
-    else toast('策略参数已保存');
+    else if (state.store.persisted === false) {
+      toast('已生效，但云端磁盘是临时的：服务重启后会恢复默认值', true);
+    } else toast('策略参数已保存');
     renderCalc();
     if (state.scan) toast('参数已更新，可重新扫描以应用新阈值');
   } catch (e) {

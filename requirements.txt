@@ -1,0 +1,7 @@
+# 本项目只用 Python 标准库，没有任何第三方依赖。
+#
+# 这个文件的作用是让云端平台认出「这是一个 Python 项目」——
+# Render / Railway / Koyeb 等平台靠 requirements.txt（或 Pipfile / pyproject.toml）
+# 来判定运行时。所以它必须留在仓库里，即使一行依赖都不装。
+#
+# 别删，删了平台就不知道用 Python 环境来跑。

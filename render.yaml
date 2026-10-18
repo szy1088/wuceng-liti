@@ -1,0 +1,49 @@
+# Render 免费部署蓝图
+#
+# 用法（最简单）：打开下面这个链接，用 GitHub 登录后点一下 Apply 就行
+#   https://render.com/deploy?repo=https://github.com/szy1088/wuceng-liti
+#
+# 免费层的代价：闲置 15 分钟会休眠，下次访问要等约 1 分钟冷启动。
+# 这是 2026 年唯一还不需要信用卡的免费长驻服务。
+
+services:
+  - type: web
+    name: wuceng-liti
+    runtime: python
+    plan: free
+
+    # 为什么选新加坡：行情接口（腾讯 / 新浪 / 东财）都在国内，
+    # 新加坡是离得最近、实测可通的节点。
+    # （实测境外 IP 访问这 7 个行情接口全部 200，延迟 370~420ms）
+    region: singapore
+
+    branch: main
+
+    # 纯标准库，没有 pip install 可做；编译一遍当作最低限度的语法体检。
+    buildCommand: "python -m compileall -q server.py push.py scan_push.py watchdog.py"
+
+    startCommand: "python server.py"
+
+    # 探针极轻量（不碰任何外部接口），适合做健康检查。
+    # 注意：如果这里失败，Render 会判定实例不健康并重启它。
+    healthCheckPath: /api/ping
+
+    autoDeploy: true
+
+    envVars:
+      # 云端必须绑 0.0.0.0，否则外部连不上（server.py 见到 PORT 也会自动切过来）
+      - key: LHT_HOST
+        value: 0.0.0.0
+      # 日志不缓冲，出问题时能立刻在 Render 面板看到
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+      # Python 版本不写死 —— 让它用平台的默认版本。
+      # 本项目只用标准库，3.9 以上都能跑，写死反而可能撞上平台没有的版本号而构建失败。
+      # 真要固定，再加：
+      # - key: PYTHON_VERSION
+      #   value: "3.13.7"
+
+      # 跨域默认关闭。只有当前端单独放 GitHub Pages 时才需要打开，填具体来源更安全：
+      # - key: LHT_CORS_ORIGIN
+      #   value: "https://szy1088.github.io"

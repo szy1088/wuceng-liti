@@ -55,8 +55,24 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 STORE_FILE = os.path.join(DATA_DIR, "store.json")
-HOST = os.environ.get("LHT_HOST", "127.0.0.1")
-PORT = int(os.environ.get("LHT_PORT", "8766"))
+
+# 监听地址。本地跑默认只绑 127.0.0.1（安全：不对局域网/公网暴露）；
+# 云端平台（Render / Railway / Koyeb …）会注入 PORT，这时自动绑 0.0.0.0，
+# 否则从外部永远连不上。
+HOST = os.environ.get("LHT_HOST") or ("0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
+PORT = int(os.environ.get("LHT_PORT") or os.environ.get("PORT") or "8766")
+
+# 跨域来源白名单。留空 = 不发 CORS 头（本地默认）。
+#
+# 为什么默认关掉：本服务有 /api/store，会返回用户填的推送密钥（Server酱 SendKey、
+# 企业微信 webhook）。如果在本地开着 127.0.0.1:8766 且允许任意来源跨域读取，
+# 那么你随手打开一个恶意网页，它就能偷偷把你的推送密钥读走。所以只在
+# 「前端部署在别处（如 GitHub Pages）、必须跨域调本 API」时才用环境变量显式打开，
+# 并且建议填具体来源而不是 "*"。
+CORS_ORIGIN = os.environ.get("LHT_CORS_ORIGIN", "").strip()
+
+# Free 实例的磁盘是临时的：配置存不下去时降级运行，不让接口 500。
+DATA_WRITABLE = True
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1875,10 +1891,13 @@ def load_store() -> dict:
                 raw["notifyChannels"] = [ch] if live else []
                 raw["notifyKeys"] = {ch: key} if live else {}
             merged["settings"] = {**DEFAULT_SETTINGS, **raw}
+            merged["persisted"] = DATA_WRITABLE
             return merged
     except Exception as exc:                            # noqa: BLE001
         _note_error(exc)
-    return dict(_DEFAULT_STORE)
+    fallback = dict(_DEFAULT_STORE)
+    fallback["persisted"] = DATA_WRITABLE
+    return fallback
 
 
 def save_store(payload: dict) -> dict:
@@ -1895,9 +1914,19 @@ def save_store(payload: dict) -> dict:
             if value is not None:
                 merged[key] = value
         current["settings"] = merged
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(STORE_FILE, "w", encoding="utf-8") as fh:
-        json.dump(current, fh, ensure_ascii=False, indent=2)
+    global DATA_WRITABLE
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(STORE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(current, fh, ensure_ascii=False, indent=2)
+        DATA_WRITABLE = True
+    except OSError as exc:
+        # 云端免费实例的磁盘可能是只读的、或者重启后就清空。存不下去不该让接口 500，
+        # 降级成「本次运行内有效」，并把这个事实告诉前端（页面会提示）。
+        if DATA_WRITABLE:
+            _note_error(exc)
+        DATA_WRITABLE = False
+    current["persisted"] = DATA_WRITABLE
     return current
 
 
@@ -1949,6 +1978,22 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
 
+    # --- 跨域（默认关闭，见 CORS_ORIGIN 的说明）---
+    def _cors(self):
+        if CORS_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", CORS_ORIGIN)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+
+    def do_OPTIONS(self):                               # noqa: N802
+        """前端部署在别处时，浏览器发 POST(JSON) 前会先来一次预检。"""
+        self.send_response(204)
+        self._cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     # --- 静态文件 ---
     def _serve_static(self, path: str):
         rel = path.lstrip("/") or "index.html"
@@ -1965,6 +2010,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", _MIME.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._cors()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1974,6 +2020,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._cors()
         self.end_headers()
         self.wfile.write(body)
 
@@ -2086,8 +2133,11 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")        # type: ignore[attr-defined]
     except Exception:                                   # noqa: BLE001
         pass
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(WEB_DIR, exist_ok=True)
+    for _d in (DATA_DIR, WEB_DIR):
+        try:
+            os.makedirs(_d, exist_ok=True)
+        except OSError:
+            pass                                        # 只读文件系统：由 save_store 降级处理
     if not os.path.exists(STORE_FILE):
         save_store({})
 

@@ -52,6 +52,82 @@ Windows 上也可以直接双击 `start.ps1`，它会自动选一个可用的 Py
 > **想让网站一直开着、被杀掉也能自动复活？** 一条命令搞定，见下面的
 > [常驻运行（守护进程）](#常驻运行守护进程)。
 
+## 部署到云端（免费）
+
+> **先澄清一个常见误解**：GitHub Pages **只能托管静态文件**，它跑不了 Python。
+> 而本项目的行情抓取、100 分制评分、缓存全在 `server.py` 里，
+> 所以**不能只靠 GitHub Pages 把站跑起来**。
+> 正确做法是把整个项目部署到一个免费的 Python 托管平台，由它同时提供页面和 API。
+
+### 一键部署到 Render
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/szy1088/wuceng-liti)
+
+1. 点上面的按钮，或用 GitHub 账号打开 <https://render.com/deploy?repo=https://github.com/szy1088/wuceng-liti>
+2. 用 GitHub 登录并授权（**不需要信用卡**）
+3. 点 **Apply** —— 配置全在 `render.yaml` 里，一个字段都不用填
+4. 等 2~3 分钟，拿到形如 `https://wuceng-liti.onrender.com` 的地址
+
+`render.yaml` 里已经定好这些：
+
+| 配置 | 值 | 为什么这么定 |
+| --- | --- | --- |
+| `plan` | `free` | 2026 年唯一还不需要信用卡的免费长驻服务 |
+| `region` | `singapore` | 行情接口都在国内，新加坡最近。境外 IP 实测这 7 个接口全部 200，延迟 370~420ms |
+| `startCommand` | `python server.py` | 零依赖，不需要 `pip install` |
+| `healthCheckPath` | `/api/ping` | 极轻量探针，不碰任何外部接口，不会被行情接口抖动误杀 |
+
+**免费层的代价**（2026 年现状，得认）：
+
+- 闲置 **15 分钟休眠**，下次访问约 **1 分钟冷启动**（这是所有免费方案的共同代价）；
+- 磁盘是**临时的**，服务重启后 `data/store.json` 恢复默认值（页面上会明确提示）；
+- 每月 750 实例小时，个人用绰绰有余。
+
+> 其他平台的免费层现状：Fly.io 已改为需要信用卡、Koyeb 缩水成 scale-to-zero、
+> Railway 只剩每月 $1 额度、Heroku 早在 2022 年就取消了免费层。
+> **不需要信用卡、还能跑长驻进程的，基本只剩 Render。**
+
+### 部署到其他平台
+
+仓库里备好了三种入口，按平台任选：
+
+| 文件 | 适用平台 |
+| --- | --- |
+| `render.yaml` | Render（一键蓝图） |
+| `Dockerfile` | Koyeb / Back4App / Northflank / 自己的 VPS |
+| `Procfile` | Heroku 系 |
+
+两个通用要点：
+
+- 平台如果注入 `PORT`，`server.py` 会**自动**改绑 `0.0.0.0:$PORT`；
+  也可以显式设 `LHT_HOST=0.0.0.0`、`LHT_PORT=...`
+- 想被外部访问，必须绑 `0.0.0.0`。本地默认只绑 `127.0.0.1`，这是有意的安全默认值。
+
+### 可选：只把前端放 GitHub Pages
+
+想用 `https://szy1088.github.io/wuceng-liti/` 这个地址的话，可以前端走 Pages、后端仍在 Render：
+
+1. 在 Render 加环境变量 `LHT_CORS_ORIGIN` = `https://szy1088.github.io`
+2. 仓库 Settings → Secrets and variables → Actions → **Variables** 新增
+   `LHT_API_BASE` = 你的 Render 地址（如 `https://wuceng-liti.onrender.com`）
+3. 仓库 Settings → **Pages** → Source 选 **GitHub Actions**
+4. Actions → 「把 web/ 发布到 GitHub Pages」→ **Run workflow**
+
+前端读的是 `web/index.html` 里的 `<meta name="lht-api-base">`，留空即同源。
+发布工作流会自动把仓库变量里的后端地址填进去。
+
+> **为什么 CORS 默认是关的**：`/api/store` 会返回你填的推送密钥（Server酱 SendKey、
+> 企业微信 webhook）。本地跑着 `127.0.0.1:8766` 时如果允许任意来源跨域读取，
+> 你随手打开一个恶意网页就能把密钥偷走。所以只有确实需要跨域时才用
+> `LHT_CORS_ORIGIN` 打开，并且建议填具体来源而不是 `*`。
+
+### 部署到公网后的安全提醒
+
+- **不要把推送密钥配在公网实例上** —— 任何人都能访问 `/api/store`。
+  而且免费层重启就丢，配了也没有意义。
+- 推送、持仓、复盘这类**带个人数据**的功能，留在本机跑就够。
+- 本服务不下单、不读账户、不连券商，即使公开也不存在资金风险。
+
 ## 常驻运行（守护进程）
 
 **目标：任何时候 http://127.0.0.1:8766 都能正常打开。**
@@ -325,6 +401,11 @@ start.ps1 / stop.ps1         启动与停止脚本（会自动协同守护的待
 store.example.json           配置模板（不含任何密钥，进版本库）
 .gitignore                   排除 data/ 与 logs/ —— 防止推送密钥被误传
 .gitattributes               锁定换行符（.ps1 必须保留 UTF-8 BOM，否则 PowerShell 5.1 会解析失败）
+requirements.txt             声明这是 Python 项目（零依赖，内容只是说明）
+render.yaml                  Render 免费部署蓝图（一键部署）
+Dockerfile                   给 Koyeb / Back4App / VPS 等平台用
+Procfile                     Heroku 系平台用
+.github/workflows/pages.yml  可选：把 web/ 发布到 GitHub Pages
 ```
 
 ## 接口一览
