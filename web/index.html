@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#070b16">
+<title>龙回头 · 五层立体短线交易系统</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070b16'/%3E%3Cpath d='M6 20 L16 25 L26 20 L26 14 L16 19 L6 14 Z' fill='%23f04438'/%3E%3Cpath d='M6 14 L16 19 L26 14 L26 8 L16 13 L6 8 Z' fill='%2322c3e6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ===== 顶栏 ===== -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-cube" aria-hidden="true">
+      <i class="c1"></i><i class="c2"></i><i class="c3"></i>
+    </div>
+    <div class="brand-text">
+      <b>龙回头</b>
+      <small>五层立体短线交易系统</small>
+    </div>
+  </div>
+
+  <div class="topbar-meta">
+    <div class="meta-chip" id="chip-session"><span class="dot"></span><b>—</b><small>—</small></div>
+    <div class="meta-chip" id="chip-market"><span class="dot info"></span><b>—</b><small>—</small></div>
+    <div class="meta-chip" id="chip-source"><span class="dot ok"></span><b>数据源</b><small>检测中</small></div>
+  </div>
+
+  <div class="topbar-actions">
+    <label class="switch" title="自动刷新行情"><input type="checkbox" id="auto-refresh" checked><span></span>自动刷新</label>
+    <button class="btn ghost" id="btn-refresh">↻ 刷新</button>
+  </div>
+</header>
+
+<div class="shell">
+
+  <!-- ===== 左侧：五层电梯 ===== -->
+  <aside class="lift">
+    <div class="lift-rail">
+      <button class="lift-btn is-active" data-layer="0">
+        <span class="lift-no">00</span>
+        <span class="lift-body"><b>总览</b><small>五层立体塔</small></span>
+      </button>
+
+      <button class="lift-btn" data-layer="1" style="--accent:#f5a524">
+        <span class="lift-no">01</span>
+        <span class="lift-body"><b>选股逻辑</b><small>非龙头不炒</small></span>
+      </button>
+
+      <button class="lift-btn" data-layer="2" style="--accent:#f04438">
+        <span class="lift-no">02</span>
+        <span class="lift-body"><b>龙回头战法</b><small>右侧确认</small></span>
+      </button>
+
+      <button class="lift-btn" data-layer="3" style="--accent:#22c3e6">
+        <span class="lift-no">03</span>
+        <span class="lift-body"><b>仓位管理</b><small>分批建仓</small></span>
+      </button>
+
+      <button class="lift-btn" data-layer="4" style="--accent:#a78bfa">
+        <span class="lift-no">04</span>
+        <span class="lift-body"><b>铁血纪律</b><small>止损止盈</small></span>
+      </button>
+
+      <button class="lift-btn" data-layer="5" style="--accent:#34d399">
+        <span class="lift-no">05</span>
+        <span class="lift-body"><b>每日复盘</b><small>盘外功夫</small></span>
+      </button>
+    </div>
+
+    <div class="lift-foot">
+      <div class="safety">
+        <i></i>
+        <div>
+          <b>只做提示 · 不下单</b>
+          <small>不连接券商，不读取账户，不发送任何委托</small>
+        </div>
+      </div>
+      <button class="btn tiny ghost full" id="btn-settings">⚙ 策略参数</button>
+    </div>
+  </aside>
+
+  <!-- ===== 主区 ===== -->
+  <main class="main" id="main">
+
+    <!-- ---------- 总览 ---------- -->
+    <section class="page is-active" data-page="0">
+      <div class="layer-hero">
+        <div class="hero-left">
+          <div class="eyebrow">五层立体 · 总览</div>
+          <h1>把短线拆成五层，逐层过滤</h1>
+          <p class="lede">
+            本系统的每一层都对应方案中的一章。上一层的结论是下一层的前提：
+            只有通过第一层「非龙头不炒」的标的，才进入第二层的龙回头形态评分；
+            形态达标后才计算第三层仓位，并由第四层纪律托管，第五层负责每日迭代。
+          </p>
+          <div class="flow">
+            <span class="flow-step" data-layer="1">选热点</span><i>→</i>
+            <span class="flow-step" data-layer="2">挑龙头</span><i>→</i>
+            <span class="flow-step" data-layer="2">缩量低吸</span><i>→</i>
+            <span class="flow-step" data-layer="3">放量加仓</span><i>→</i>
+            <span class="flow-step" data-layer="4">严格止损止盈</span>
+          </div>
+        </div>
+
+        <!-- 3D 五层塔 -->
+        <div class="tower-stage">
+          <div class="tower" id="tower">
+            <!-- JS 渲染五层 -->
+          </div>
+          <div class="tower-shadow"></div>
+        </div>
+      </div>
+
+      <div class="kpi-row" id="kpi-row"></div>
+
+      <div class="index-strip" id="index-strip"></div>
+
+      <div class="grid-2">
+        <article class="panel">
+          <div class="panel-head">
+            <div><h2>今日热点题材</h2><p>涨停池按行业板块聚合 · 第一层「选热点」的原料</p></div>
+            <button class="btn tiny ghost" data-goto="1">进入第一层 →</button>
+          </div>
+          <div class="hot-mini" id="hot-mini"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><h2>龙回头命中</h2><p>A / B 级标的 · 第二层形态评分结果</p></div>
+            <button class="btn tiny ghost" data-goto="2">进入第二层 →</button>
+          </div>
+          <div class="hot-mini" id="scan-mini"></div>
+        </article>
+      </div>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div><h2>数据源状态</h2><p>全部为公开接口，无需任何密钥</p></div>
+          <span class="tag" id="src-tag">—</span>
+        </div>
+        <div class="src-grid" id="src-grid"></div>
+      </article>
+    </section>
+
+    <!-- ---------- 第 1 层 ---------- -->
+    <section class="page" data-page="1">
+      <div class="layer-banner" data-accent="#f5a524">
+        <div class="lb-index">01</div>
+        <div class="lb-copy">
+          <div class="eyebrow">第一层 · 核心选股逻辑</div>
+          <h1>非龙头不炒</h1>
+          <p>短线的核心是「借势」。只在当前市场绝对热点里找机会，每个热点只做龙一、龙二；
+             流通市值 30 亿 ~ 120 亿，拉升期换手 10% ~ 20%。</p>
+        </div>
+        <div class="lb-planes" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div><h2>热点题材强度</h2><p>由今日涨停池按行业板块聚合，涨停家数即资金共识强度</p></div>
+          <span class="tag" id="hot-date">—</span>
+        </div>
+        <div class="hot-grid" id="hot-grid"><div class="skeleton">加载中…</div></div>
+      </div>
+
+      <div class="grid-2">
+        <article class="panel">
+          <div class="panel-head"><div><h2>概念板块榜</h2><p>新浪概念板块涨幅前 14</p></div>
+            <button class="btn tiny ghost" data-reload="boards">↻</button></div>
+          <div class="table-wrap"><table class="tbl" id="tbl-concept"></table></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><div><h2>行业板块榜</h2><p>新浪行业板块涨幅前 14</p></div>
+            <button class="btn tiny ghost" data-reload="boards">↻</button></div>
+          <div class="table-wrap"><table class="tbl" id="tbl-industry"></table></div>
+        </article>
+      </div>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div><h2>连板梯队</h2><p>今日涨停池按连板高度分布 · 梯队完整度决定题材持续性</p></div>
+          <span class="tag" id="ladder-tag">—</span>
+        </div>
+        <div class="ladder" id="ladder"></div>
+        <div class="table-wrap"><table class="tbl" id="tbl-limitup"></table></div>
+      </article>
+    </section>
+
+    <!-- ---------- 第 2 层 ---------- -->
+    <section class="page" data-page="2">
+      <div class="layer-banner" data-accent="#f04438">
+        <div class="lb-index">02</div>
+        <div class="lb-copy">
+          <div class="eyebrow">第二层 · 核心战法</div>
+          <h1>右侧「龙回头」</h1>
+          <p>前期 2~3 个强悍连板确立辨识度 → 缩量回踩 3~8 日、幅度 20%~30% →
+             均线止跌（稳健买点）或放量突破洗盘高点（激进买点）。</p>
+        </div>
+        <div class="lb-planes" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+
+      <div class="panel scan-bar">
+        <div class="scan-controls">
+          <label>扫描候选数 <input type="number" id="scan-limit" value="40" min="10" max="80" step="10"></label>
+          <label>统计窗口（交易日） <input type="number" id="scan-days" value="10" min="3" max="15"></label>
+          <button class="btn primary" id="btn-scan">▶ 开始扫描龙回头</button>
+          <button class="btn ghost" id="btn-push-scan" title="把评分达标的标的推到微信">📤 推送到微信</button>
+        </div>
+        <div class="scan-note" id="scan-note">扫描对象：近 N 个交易日涨停池中的连板股（前期走牛）+ 今日涨停 + 自选池。</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div><h2>龙回头评分榜（100 分制）</h2>
+            <p>龙头辨识度 25 · 回调时间 15 · 回调幅度 20 · 缩量程度 20 · 均线支撑 10 · 流通市值 5 · 拉升换手 5</p></div>
+          <span class="tag" id="scan-tag">未扫描</span>
+        </div>
+        <div id="scan-result"><div class="empty">点击「开始扫描龙回头」拉取真实行情并计算评分。</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h2>评分明细与买卖点</h2><p>点击上方任一标的查看</p></div></div>
+        <div id="stock-detail"><div class="empty">尚未选择标的。</div></div>
+      </div>
+    </section>
+
+    <!-- ---------- 第 3 层 ---------- -->
+    <section class="page" data-page="3">
+      <div class="layer-banner" data-accent="#22c3e6">
+        <div class="lb-index">03</div>
+        <div class="lb-copy">
+          <div class="eyebrow">第三层 · 日内交易与仓位管理</div>
+          <h1>永远不要孤注一掷</h1>
+          <p>短线资金平分为 2~3 等份；单只股票持仓绝不超过总资金 50%；
+             先下 30% 观察哨，右侧转强再补足；持股 1~5 个交易日，3 日未启动即离场。</p>
+        </div>
+        <div class="lb-planes" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+
+      <div class="grid-2">
+        <article class="panel">
+          <div class="panel-head"><div><h2>仓位计算器</h2><p>按第三层铁律即时测算</p></div></div>
+          <div class="form-grid">
+            <label>短线总资金（元）<input type="number" id="calc-capital" value="100000" min="1000" step="1000"></label>
+            <label>单股持仓上限（%）<input type="number" id="calc-maxpct" value="50" min="5" max="50"></label>
+            <label>首笔观察哨比例（%）<input type="number" id="calc-starter" value="30" min="5" max="100"></label>
+            <label>买入价格（元）<input type="number" id="calc-price" value="20" min="0.01" step="0.01"></label>
+          </div>
+          <div class="calc-out" id="calc-out"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><h2>第三层铁律</h2><p>方案原文摘要</p></div></div>
+          <ul class="rules">
+            <li><b>仓位铁律</b>　短线资金平分为 2~3 等份；单只股票持仓绝不超过总资金 50%。</li>
+            <li><b>分批建仓</b>　先下 30% 的「观察哨」，等分时图走势符合预期、右侧转强时再补足确认仓位。</li>
+            <li><b>时间管理</b>　沪深主板 T+1；持股周期一般 1~5 个交易日。</li>
+            <li><b>效率退出</b>　买入后 3 天内没有产生预期爆发，且跌破持股结构，无论输赢果断离场。</li>
+          </ul>
+          <div class="divider"></div>
+          <div class="calc-out" id="checklist-out"></div>
+        </article>
+      </div>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div><h2>我的持仓</h2><p>持仓由第四层纪律模块托管，此处只做仓位体检</p></div>
+          <span class="tag" id="pos-tag">—</span>
+        </div>
+        <div class="table-wrap"><table class="tbl" id="tbl-positions"></table></div>
+      </article>
+    </section>
+
+    <!-- ---------- 第 4 层 ---------- -->
+    <section class="page" data-page="4">
+      <div class="layer-banner" data-accent="#a78bfa">
+        <div class="lb-index">04</div>
+        <div class="lb-copy">
+          <div class="eyebrow">第四层 · 铁血纪律</div>
+          <h1>会止损的是祖师爷</h1>
+          <p>以成本价 -3% ~ -5% 设绝对止损线；盈利 5% ~ 10% 先落袋一半；
+             跌破 5 日均线或分时走弱则清仓。触发即无条件执行。</p>
+        </div>
+        <div class="lb-planes" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div><h2>持仓纪律诊断</h2><p>实时行情驱动，只给提示不执行交易</p></div>
+          <button class="btn ghost" id="btn-eval">↻ 重新诊断</button>
+        </div>
+        <div id="discipline"><div class="empty">先在下方录入持仓，再点击「重新诊断」。</div></div>
+      </div>
+
+      <div class="grid-2">
+        <article class="panel">
+          <div class="panel-head"><div><h2>录入持仓</h2><p>用于纪律体检与止损止盈提示</p></div></div>
+          <div class="form-grid">
+            <label>股票代码<input id="pos-code" placeholder="如 600000" maxlength="6"></label>
+            <label>成本价<input type="number" id="pos-cost" step="0.01" placeholder="0.00"></label>
+            <label>持仓股数<input type="number" id="pos-qty" step="100" placeholder="100"></label>
+            <label>买入日期<input type="date" id="pos-date"></label>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" id="btn-add-pos">＋ 加入持仓</button>
+            <span class="muted" id="pos-msg"></span>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><h2>第四层规则表</h2><p>优先级自上而下，先命中者决定动作</p></div></div>
+          <ol class="rules ordered">
+            <li><b>绝对止损</b>　浮亏触及 -3% ~ -5%，清仓，绝不补仓摊薄。</li>
+            <li><b>跌破 5 日均线</b>　已有浮盈但跌破 5 日线，清仓享受利润。</li>
+            <li><b>二档止盈</b>　浮盈 ≥ 10%，清仓兑现。</li>
+            <li><b>一档止盈</b>　浮盈 ≥ 5%，先落袋一半（不足 200 股则继续持有）。</li>
+            <li><b>效率退出</b>　持有 ≥ 3 日、浮盈 &lt; 3%、当日走弱 → 清仓释放资金。</li>
+            <li><b>走弱预警</b>　当日跌幅 ≤ -2% 且浮亏 → 盯紧分时与均价线。</li>
+          </ol>
+        </article>
+      </div>
+    </section>
+
+    <!-- ---------- 第 5 层 ---------- -->
+    <section class="page" data-page="5">
+      <div class="layer-banner" data-accent="#34d399">
+        <div class="lb-index">05</div>
+        <div class="lb-copy">
+          <div class="eyebrow">第五层 · 实施准备</div>
+          <h1>短线功夫在盘外</h1>
+          <p>每天收盘后花 1 小时：梳理涨幅榜归纳最强板块、建立龙回头股票池、
+             监控市场情绪（连板高度、跌停家数、涨跌比）。</p>
+        </div>
+        <div class="lb-planes" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+
+      <div class="grid-3">
+        <article class="panel gauge-panel">
+          <div class="panel-head"><div><h2>情绪温度</h2><p>跌停家数与连板高度驱动</p></div></div>
+          <div class="gauge" id="gauge"></div>
+        </article>
+        <article class="panel stat-panel" id="sentiment-stats"></article>
+        <article class="panel">
+          <div class="panel-head"><div><h2>连板梯队</h2><p>今日涨停池分布</p></div></div>
+          <div class="ladder" id="ladder2"></div>
+        </article>
+      </div>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div><h2>龙回头股票池</h2><p>近 N 个交易日涨停池聚合，找出「过去两周最强的龙头」</p></div>
+          <div class="row-actions">
+            <label class="mini">窗口 <input type="number" id="dragon-days" value="10" min="3" max="15"></label>
+            <button class="btn tiny ghost" id="btn-dragons">↻ 重建股票池</button>
+          </div>
+        </div>
+        <div id="dragon-pool"><div class="skeleton">加载中…</div></div>
+      </article>
+
+      <div class="grid-2">
+        <article class="panel">
+          <div class="panel-head"><div><h2>今日复盘记录</h2><p>把盘外功课固定下来</p></div></div>
+          <div class="form-grid">
+            <label>最强题材 1<input id="rv-theme1" placeholder="如 汽车零部件"></label>
+            <label>最强题材 2<input id="rv-theme2" placeholder="可留空"></label>
+            <label>最高连板高度<input type="number" id="rv-maxboard" min="0"></label>
+            <label>跌停家数<input type="number" id="rv-limitdown" min="0"></label>
+            <label class="check full"><input type="checkbox" id="rv-panic"> 情绪退潮，次日空仓或大幅减仓</label>
+            <label class="full">次日计划<textarea id="rv-plan" rows="2" placeholder="重点观察的标的与买点"></textarea></label>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" id="btn-save-review">保存复盘</button>
+            <span class="muted" id="rv-msg"></span>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><div><h2>历史复盘</h2><p>最近的复盘记录</p></div></div>
+          <div id="review-list"><div class="empty">暂无复盘记录。</div></div>
+        </article>
+      </div>
+    </section>
+
+    <footer class="foot">
+      龙回头 · 五层立体短线交易系统　|　行情来自腾讯 / 新浪 / 东方财富公开接口　|　
+      本系统只做纪律提示，不构成投资建议，不连接券商、不发送任何委托
+    </footer>
+  </main>
+</div>
+
+<!-- ===== 设置对话框 ===== -->
+<dialog id="dlg-settings" class="dlg">
+  <form method="dialog">
+    <div class="dlg-head">
+      <div><h2>策略参数</h2><p>默认值取自方案原文的区间表达，可自行调整</p></div>
+      <button class="icon-btn" value="cancel">×</button>
+    </div>
+    <div class="form-grid" id="settings-form"></div>
+
+    <div class="form-sub">
+      微信推送
+      <span>只做「系统 → 你」的单向提醒，不登录微信、不读取账户、不发送任何委托</span>
+    </div>
+    <div id="notify-form"></div>
+
+    <div class="dlg-foot">
+      <span class="muted" id="set-msg"></span>
+      <div>
+        <button class="btn ghost" id="btn-test-push" type="button">📶 测试推送</button>
+        <button class="btn ghost" value="cancel">取消</button>
+        <button class="btn primary" id="btn-save-settings" value="default">保存参数</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast"></div>
+<div class="hovercard" id="hovercard" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

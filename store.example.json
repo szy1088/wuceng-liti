@@ -1,0 +1,42 @@
+{
+  "_说明": [
+    "这是配置模板，不含任何真实密钥。",
+    "用法：复制成 data/store.json 再改成你自己的值。",
+    "  Windows PowerShell:  Copy-Item store.example.json data\\store.json",
+    "页面里也能直接改（改完点保存即写回 data/store.json）。"
+  ],
+  "settings": {
+    "capital": 100000.0,
+    "maxPositionPct": 50.0,
+    "sleeveCount": 3,
+    "starterPct": 30.0,
+    "stopLossPct": 4.0,
+    "takeProfitHalfPct": 5.0,
+    "takeProfitFullPct": 10.0,
+    "staleDays": 3,
+    "floatCapMin": 30.0,
+    "floatCapMax": 120.0,
+    "pullbackDaysMin": 3,
+    "pullbackDaysMax": 8,
+    "pullbackPctMin": 20.0,
+    "pullbackPctMax": 30.0,
+    "panicLimitDowns": 20,
+
+    "notifyChannels": [],
+    "notifyKeys": {
+      "serverchan": "",
+      "pushplus": "",
+      "wecom": ""
+    },
+
+    "notifyMinScore": 65,
+    "notifyTopN": 8,
+    "notifyTimes": "15:05",
+    "notifyDays": 10,
+    "notifyScanLimit": 40
+  },
+  "watchlist": [],
+  "positions": [],
+  "reviews": [],
+  "trades": []
+}

@@ -1,0 +1,19 @@
+# 统一换行符策略，避免 Windows / Linux 之间来回 checkout 时
+# 把文件改得面目全非（.ps1 尤其重要 —— 它们必须保留 UTF-8 BOM，
+# 否则 PowerShell 5.1 会按 GBK 解码而解析失败）。
+* text=auto
+
+*.ps1    text eol=crlf
+*.py     text eol=lf
+*.js     text eol=lf
+*.css    text eol=lf
+*.html   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+
+*.docx   binary
+*.png    binary
+*.jpg    binary
+*.ico    binary
