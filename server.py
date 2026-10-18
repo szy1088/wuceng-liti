@@ -43,6 +43,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import push as _push                                    # 同目录下的推送通道模块
@@ -1964,6 +1965,22 @@ def _q1(query: dict, key: str):
     return values[0] if values else None
 
 
+def dispatch_api(path: str, query: dict, body) -> tuple:
+    """API 分发的唯一实现，返回 ``(状态码, 响应对象)``。
+
+    刻意不碰任何 socket 细节 —— 本机的 http.server 和云端的 WSGI
+    都调这一个函数，接口行为才不会两边跑偏。
+    """
+    handler = ROUTES.get(path)
+    if handler is None:
+        return 404, {"ok": False, "error": "未知接口 " + path}
+    try:
+        return 200, handler(query, body)
+    except Exception as exc:                            # noqa: BLE001
+        _note_error(exc)
+        return 500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
 _MIME = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -2029,51 +2046,133 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        query = urllib.parse.parse_qs(parsed.query)
-        handler = ROUTES.get(path)
-        if handler is None:
-            if path.startswith("/api/"):
-                self._json({"ok": False, "error": "未知接口 " + path}, 404)
-            else:
-                try:
-                    self._serve_static(path)
-                except ConnectionError:
-                    pass                                # 客户端已走，静默收场
+        if parsed.path.startswith("/api/"):
+            status, obj = dispatch_api(parsed.path,
+                                       urllib.parse.parse_qs(parsed.query), None)
+            try:
+                self._json(obj, status)
+            except ConnectionError:
+                pass                                    # 客户端已走，静默收场
             return
         try:
-            self._json(handler(query, None))
+            self._serve_static(parsed.path)
         except ConnectionError:
             pass                                        # 客户端已走，静默收场
-        except Exception as exc:                        # noqa: BLE001
-            _note_error(exc)
-            try:
-                self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 500)
-            except ConnectionError:
-                pass
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        handler = ROUTES.get(parsed.path)
-        if handler is None:
-            self._json({"ok": False, "error": "未知接口 " + parsed.path}, 404)
-            return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
             payload = json.loads(raw.decode("utf-8")) if raw else {}
         except json.JSONDecodeError:
             payload = {}
+        status, obj = dispatch_api(parsed.path,
+                                   urllib.parse.parse_qs(parsed.query), payload)
         try:
-            self._json(handler(urllib.parse.parse_qs(parsed.query), payload))
+            self._json(obj, status)
         except ConnectionError:
             pass                                        # 客户端已走，静默收场
-        except Exception as exc:                        # noqa: BLE001
-            _note_error(exc)
+
+
+# ----------------------------------------------------------------------------
+# WSGI 适配层（给 Vercel 这类 serverless 平台用）
+# ----------------------------------------------------------------------------
+# 本机跑的是 http.server —— 一个长驻进程，绑端口、自己管 socket。
+# 而 Vercel 这类平台不要长驻进程，它只接受一个"可调用对象"：
+#     app(environ, start_response)     ← WSGI 协议，顶层变量名必须叫 app
+#
+# 下面用几十行把同一张 ROUTES 表接到 WSGI 上，业务逻辑一行都不用改。
+# 两条路径共用上面的 dispatch_api，接口行为不会两边跑偏。
+#
+# 本机启动走的是文件末尾 main() 里的 http.server，只有平台 import 本模块
+# 取 app 时下面这些才会起作用 —— 两边互不干扰。
+
+def make_app(route: str = None):
+    """造一个 WSGI 应用。
+
+    ``route`` 指定时，这个应用只服务那一个接口。Vercel 的 /api 目录约定是
+    一个文件对一个路由，api/*.py 里就是这么用的。之所以把路由"钉死"而不是
+    靠 PATH_INFO 判断，是因为平台不保证把原始路径原样传进来。
+
+    ``route`` 为 None 时按 PATH_INFO 分发，作为兜底。
+    """
+
+    def _app(environ, start_response):
+        method = (environ.get("REQUEST_METHOD") or "GET").upper()
+        path = route or (environ.get("PATH_INFO") or "/")
+        query = urllib.parse.parse_qs(environ.get("QUERY_STRING") or "")
+
+        if method == "OPTIONS":                         # 跨域预检
+            return _wsgi_send(start_response, 204, b"", "text/plain; charset=utf-8")
+
+        if method == "POST":
             try:
-                self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 500)
-            except ConnectionError:
-                pass
+                length = int(environ.get("CONTENT_LENGTH") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            raw = environ["wsgi.input"].read(length) if length else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except (ValueError, UnicodeDecodeError):
+                body = {}
+        elif method == "GET":
+            body = None
+        else:
+            return _wsgi_send(start_response, 405, b"", "text/plain; charset=utf-8")
+
+        if route or path.startswith("/api/"):
+            status, obj = dispatch_api(path, query, body)
+            payload = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
+            return _wsgi_send(start_response, status, payload,
+                              "application/json; charset=utf-8")
+
+        # 非 /api 路径：兜底发静态文件。
+        # 正常情况下 Vercel 的 CDN 会直接命中 web/ 里的文件，根本走不到这里；
+        # 万一平台把请求整个丢过来，这里也能顶上，不至于白屏。
+        return _wsgi_static(environ, start_response)
+
+    return _app
+
+
+def _wsgi_send(start_response, status: int, body: bytes, content_type: str):
+    """按 WSGI 协议回一个响应，并统一带上跨域头（跟 Handler._cors 一致）。"""
+    try:
+        reason = HTTPStatus(status).phrase
+    except ValueError:
+        reason = "OK"
+    headers = [
+        ("Content-Type", content_type),
+        ("Content-Length", str(len(body))),
+        ("Cache-Control", "no-store"),
+    ]
+    if CORS_ORIGIN:
+        headers += [
+            ("Access-Control-Allow-Origin", CORS_ORIGIN),
+            ("Vary", "Origin"),
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type"),
+            ("Access-Control-Max-Age", "600"),
+        ]
+    start_response("%d %s" % (status, reason), headers)
+    return [body]
+
+
+def _wsgi_static(environ, start_response):
+    """兜底静态文件服务，行为跟 Handler._serve_static 保持一致。"""
+    rel = (environ.get("PATH_INFO") or "/").lstrip("/") or "index.html"
+    full = os.path.normpath(os.path.join(WEB_DIR, rel))
+    if not full.startswith(WEB_DIR) or not os.path.isfile(full):
+        return _wsgi_send(start_response, 404, b"Not Found", "text/plain; charset=utf-8")
+    ext = os.path.splitext(full)[1].lower()
+    with open(full, "rb") as fh:
+        data = fh.read()
+    return _wsgi_send(start_response, 200, data,
+                      _MIME.get(ext, "application/octet-stream"))
+
+
+# 平台认这个名字。本机跑 http.server 时用不到它，放着也不碍事。
+app = make_app()
 
 
 def _notify_worker():
