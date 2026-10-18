@@ -22,6 +22,9 @@ __pycache__/
 venv/
 env/
 
+# Vercel CLI 的本地状态（用网页导入部署不会产生，用 CLI 会）
+.vercel/
+
 # 编辑器 / 系统
 .vscode/
 .idea/
