@@ -57,6 +57,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -199,7 +200,11 @@ def _python_exe() -> str:
 
 def _read_pid(path: str) -> int:
     try:
-        with open(path, encoding="utf-8") as fh:
+        # 用 utf-8-sig 而不是 utf-8：万一这个文件被 PowerShell / 记事本带 BOM 保存过，
+        # 用 "utf-8" 读会在 int() 处抛异常，于是守护进程误判"该角色没在跑"，
+        # 反复拉起重复进程。凡是用户可能碰过的文本文件，一律用 utf-8-sig 更稳
+        # （utf-8-sig 读没有 BOM 的文件也完全正常）。
+        with open(path, encoding="utf-8-sig") as fh:
             return int((fh.read() or "0").strip() or 0)
     except Exception:                                   # noqa: BLE001
         return 0
@@ -390,6 +395,172 @@ def remove_autostart() -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# 云端实例保活（可选，默认关闭）
+# ---------------------------------------------------------------------------
+# 免费层实例闲置 15 分钟就休眠，你下次打开要等约 1 分钟冷启动。
+# 主守护会顺手在交易时段里定时戳一下线上地址，让它保持"热"的状态，
+# 这样你随手打开就是秒开。
+#
+# 配置放 data/keepalive.json（data/ 已被 .gitignore 排除，不会上传），
+# 格式参照仓库根目录的 keepalive.example.json。
+# 文件不存在 / enabled 不是 true = 完全不启用，不影响任何其它功能。
+#
+# 两个关键设计：
+#   1) 探测必须放子线程 —— 冷启动要等 60 秒，同步等会把本机服务的监控晾在一边，
+#      而这 60 秒里恰恰是你最需要它看着的时候。
+#   2) 只在本机跑 —— 守护进程永远不会部署到云端，所以不会出现"自己戳自己"
+#      从而把免费额度 24 小时耗光的蠢事。
+
+KEEPALIVE_FILE = os.path.join(DATA_DIR, "keepalive.json")
+KEEPALIVE_STATE = os.path.join(DATA_DIR, "keepalive.state")   # 落盘状态，好让 status 命令读到
+KEEPALIVE_MIN_INTERVAL = 60.0        # 免费层 15 分钟才睡，比这更密的间隔没有意义
+KEEPALIVE_DEFAULT_TIMEOUT = 90.0     # 冷启动慢，超时给足
+KEEPALIVE_DEFAULT_WINDOWS = [("09:00", "11:35"), ("12:45", "15:10")]
+
+_ka_lock = threading.Lock()
+_ka_busy = False                     # 上一个请求还没回来
+_ka_last = 0.0                       # 上次发起时间
+_ka_result = "尚未执行"               # 最近一次结果（仅本进程内有效）
+_ka_prev_ok = None                   # None = 还没跑过；这样每次重启后的第一笔一定会记日志
+_ka_cache = {"at": 0.0, "cfg": {}}
+
+
+def _hhmm(text) -> str:
+    """把 '9:05' / '09:05' 统一成 'HH:MM'；格式不对返回空串。"""
+    raw = str(text or "").strip()
+    if ":" not in raw:
+        return ""
+    hh, _, mm = raw.partition(":")
+    try:
+        return "%02d:%02d" % (int(hh), int(mm))
+    except ValueError:
+        return ""
+
+
+def _keepalive_config() -> dict:
+    """读保活配置，带 30 秒缓存（这样改完文件很快生效，又不会每 5 秒开一次文件）。"""
+    now = time.time()
+    if now - _ka_cache["at"] < 30.0:
+        return _ka_cache["cfg"]
+
+    cfg = {}
+    try:
+        with open(KEEPALIVE_FILE, "r", encoding="utf-8-sig") as fh:
+            raw = json.load(fh)
+        if isinstance(raw, dict) and raw.get("enabled"):
+            url = str(raw.get("url") or "").strip()
+            if url.startswith("http"):
+                windows = []
+                for item in (raw.get("windows") or []):
+                    head, _, tail = str(item).partition("-")
+                    head, tail = _hhmm(head), _hhmm(tail)
+                    if head and tail:
+                        windows.append((head, tail))
+                if not windows:
+                    windows = list(KEEPALIVE_DEFAULT_WINDOWS)
+                try:
+                    interval = float(raw.get("interval_seconds", 600))
+                except (TypeError, ValueError):
+                    interval = 600.0
+                try:
+                    timeout = float(raw.get("timeout_seconds", KEEPALIVE_DEFAULT_TIMEOUT))
+                except (TypeError, ValueError):
+                    timeout = KEEPALIVE_DEFAULT_TIMEOUT
+                cfg = {
+                    "url": url,
+                    "interval": max(KEEPALIVE_MIN_INTERVAL, interval),
+                    "timeout": max(5.0, timeout),
+                    "windows": windows,
+                    "weekdays_only": bool(raw.get("weekdays_only", True)),
+                }
+    except Exception:                                   # noqa: BLE001
+        cfg = {}                                        # 文件不在 / 坏了 = 不启用
+
+    _ka_cache["at"] = now
+    _ka_cache["cfg"] = cfg
+    return cfg
+
+
+def _keepalive_ping(cfg: dict, role: str) -> None:
+    """子线程里真正去戳远端。纯 urllib，不起子进程，不会闪黑窗。"""
+    global _ka_busy, _ka_result, _ka_prev_ok
+    url = cfg["url"].rstrip("/") + "/api/ping"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "LHT-Keepalive/1.0"})
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as resp:
+            body = resp.read(4096).decode("utf-8", errors="ignore")
+            status = getattr(resp, "status", 200)
+        ok = (status == 200) and ("longhuitou" in body)
+        detail = "HTTP %s" % status
+    except Exception as exc:                            # noqa: BLE001
+        ok = False
+        detail = "%s: %s" % (type(exc).__name__, str(exc)[:60])
+
+    with _ka_lock:
+        _ka_busy = False
+        _ka_result = ("唤醒成功 " if ok else "失败 ") + detail
+        flipped = (ok != _ka_prev_ok)
+        _ka_prev_ok = ok
+
+    # 落盘，好让另起进程执行的 `task.ps1 status` 也能看到最近一次的情况
+    try:
+        with open(KEEPALIVE_STATE, "w", encoding="utf-8") as fh:
+            json.dump({"at": time.time(), "ok": ok, "detail": detail, "url": cfg["url"]},
+                      fh, ensure_ascii=False)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+    # 成功且状态没变就不记日志 —— 一个交易日 30 多次成功记录只会把日志淹掉。
+    # 只在"首次执行""从失败恢复""开始失败"时记一笔，日志才读得下去。
+    if ok:
+        if flipped:
+            _log("云端实例保活正常（%s）" % detail, role)
+    else:
+        _log("云端保活失败（%s）" % detail, role)
+
+
+def keepalive_tick(role: str) -> None:
+    """主守护每轮调一次：该戳就起个子线程去戳，绝不阻塞主循环。"""
+    global _ka_busy, _ka_last
+    cfg = _keepalive_config()
+    if not cfg:
+        return
+
+    now = _dt.datetime.now()
+    if cfg["weekdays_only"] and now.weekday() >= 5:
+        return                                          # 周末休市，不用叫醒
+    hm = now.strftime("%H:%M")
+    if not any(start <= hm <= end for start, end in cfg["windows"]):
+        return                                          # 不在交易时段，省着点用免费额度
+
+    with _ka_lock:
+        if _ka_busy:
+            return                                      # 上一次还没回来，别叠着发
+        if (time.time() - _ka_last) < cfg["interval"]:
+            return                                      # 还没到下次该戳的时间
+        _ka_busy = True
+        _ka_last = time.time()
+
+    threading.Thread(target=_keepalive_ping, args=(cfg, role), daemon=True).start()
+
+
+def _keepalive_last_note() -> str:
+    """读落盘状态，给 status 命令用。
+
+    `task.ps1 status` 是另起一个进程跑 `watchdog.py --status`，
+    读不到守护进程内存里的 _ka_result，所以必须靠这个文件。
+    """
+    try:
+        with open(KEEPALIVE_STATE, "r", encoding="utf-8-sig") as fh:
+            state = json.load(fh)
+        when = time.strftime("%m-%d %H:%M", time.localtime(float(state.get("at", 0))))
+        return "%s %s（%s）" % ("成功" if state.get("ok") else "失败",
+                               state.get("detail", "?"), when)
+    except Exception:                                   # noqa: BLE001
+        return "还没执行过"
+
+
+# ---------------------------------------------------------------------------
 # 主循环：主守护
 # ---------------------------------------------------------------------------
 
@@ -465,6 +636,9 @@ def run_primary(no_guard: bool = False) -> int:
                 if not hok:
                     _log("自启项自检失败：%s" % hmsg, role)
 
+            # ---- 顺手把云端实例叫醒（可选，见上面"云端实例保活"一节）----
+            keepalive_tick(role)
+
         except KeyboardInterrupt:
             _log("收到 Ctrl+C，主守护退出。", role)
             return 0
@@ -530,6 +704,17 @@ def _status() -> int:
     print("服务   : %s http://127.0.0.1:%d  %s"
           % ("OK  " if alive else "DOWN", PORT, detail))
     print("待机   : %s" % ("是" if _paused() else "否"))
+    ka = _keepalive_config()
+    if ka:
+        spans = "、".join("%s-%s" % (a, b) for a, b in ka["windows"])
+        print("保活   : %s" % ka["url"])
+        print("         每 %.0f 分钟一次%s，时段 %s"
+              % (ka["interval"] / 60.0,
+                 "（仅工作日）" if ka["weekdays_only"] else "",
+                 spans))
+        print("         最近一次：%s" % _keepalive_last_note())
+    else:
+        print("保活   : 未启用（没有 data/keepalive.json，或 enabled 不是 true）")
     return 0 if alive else 1
 
 

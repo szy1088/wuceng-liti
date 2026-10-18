@@ -1877,7 +1877,10 @@ _DEFAULT_STORE = {
 def load_store() -> dict:
     try:
         if os.path.exists(STORE_FILE):
-            with open(STORE_FILE, "r", encoding="utf-8") as fh:
+            # utf-8-sig：用户手工改 store.json（或用 PowerShell 生成）时很容易带上 BOM，
+            # 用纯 "utf-8" 读会让 json.load 直接抛异常，于是整个配置被静默重置成默认值
+            # （推送密钥、持仓、复盘全"丢"）。utf-8-sig 读没有 BOM 的文件也完全正常。
+            with open(STORE_FILE, "r", encoding="utf-8-sig") as fh:
                 data = json.load(fh)
             merged = dict(_DEFAULT_STORE)
             merged.update(data)

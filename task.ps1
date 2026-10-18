@@ -281,6 +281,46 @@ switch ($Action) {
         }
 
         Write-Host ''
+        Write-Host '=== 云端保活 ===' -ForegroundColor Cyan
+        $kaFile = Join-Path (Join-Path $root 'data') 'keepalive.json'
+        $kaState = Join-Path (Join-Path $root 'data') 'keepalive.state'
+        $ka = $null
+        if (Test-Path $kaFile) {
+            # 用 ReadAllText 而不是 Get-Content：它会自动识别并剥掉 BOM。
+            # 用户用 PowerShell / 记事本保存这个文件时很容易带上 BOM，
+            # 而带 BOM 的 JSON 用普通 utf-8 解析会直接失败（这个坑已经踩过一次）。
+            try { $ka = [System.IO.File]::ReadAllText($kaFile) | ConvertFrom-Json } catch { $ka = $null }
+        }
+        if ((-not $ka) -or (-not $ka.enabled)) {
+            Write-Host '  未启用（没有 data\keepalive.json，或 enabled 不是 true）' -ForegroundColor DarkGray
+            Write-Host '  提示：复制 keepalive.example.json 到 data\keepalive.json 即可开启' -ForegroundColor DarkGray
+        } else {
+            Write-Host ('  目标：{0}' -f $ka.url) -ForegroundColor Green
+            $kaMins = [math]::Round(([double]$ka.interval_seconds) / 60, 0)
+            $kaWd = ''
+            if ($ka.weekdays_only) { $kaWd = '（仅工作日）' }
+            Write-Host ('  频率：每 {0} 分钟一次{1}' -f $kaMins, $kaWd)
+            Write-Host ('  时段：{0}' -f (($ka.windows) -join '、'))
+            Write-Host '  作用：交易时段定时唤醒，避免你打开时正好赶上约 1 分钟的冷启动' -ForegroundColor DarkGray
+            if (Test-Path $kaState) {
+                try {
+                    $st = [System.IO.File]::ReadAllText($kaState) | ConvertFrom-Json
+                    $epoch = [datetime]::SpecifyKind([datetime]'1970-01-01', [DateTimeKind]::Utc)
+                    $when = $epoch.ToLocalTime().AddSeconds([double]$st.at).ToString('MM-dd HH:mm')
+                    if ($st.ok) {
+                        Write-Host ('  最近：成功 {0}（{1}）' -f $st.detail, $when) -ForegroundColor Green
+                    } else {
+                        Write-Host ('  最近：失败 {0}（{1}）' -f $st.detail, $when) -ForegroundColor Yellow
+                    }
+                } catch {
+                    Write-Host '  最近：状态文件无法解析' -ForegroundColor DarkGray
+                }
+            } else {
+                Write-Host '  最近：还没执行过（守护会在进入时段后自动开始）' -ForegroundColor DarkGray
+            }
+        }
+
+        Write-Host ''
         Write-Host '=== 守护日志（最后 12 行） ===' -ForegroundColor Cyan
         $wdLog = Join-Path $logDir 'watchdog.log'
         if (Test-Path $wdLog) {

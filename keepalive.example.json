@@ -1,0 +1,12 @@
+{
+  "_说明": "云端实例保活配置。复制成 data/keepalive.json，把 enabled 改成 true 即生效。",
+  "_说明2": "作用：免费层实例闲置 15 分钟会休眠，本机守护会在交易时段定时戳一下它，让你随手打开就是秒开。",
+  "_说明3": "url 填你的线上地址；windows 是生效时段（本机时间）；没装 data/keepalive.json 就完全不启用。",
+
+  "enabled": false,
+  "url": "https://wuceng-liti.onrender.com",
+  "interval_seconds": 600,
+  "windows": ["09:00-11:35", "12:45-15:10"],
+  "weekdays_only": true,
+  "timeout_seconds": 90
+}

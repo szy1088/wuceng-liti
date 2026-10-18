@@ -1,0 +1,50 @@
+name: 开盘前自动唤醒线上实例
+
+# 这是「本机保活」的兜底方案。
+#
+# 主力其实是本机的 watchdog.py（见 README 的「云端保活」一节）：
+# 它在交易时段每 10 分钟戳一次线上地址，时间精准、不依赖第三方。
+# 但它有个前提 —— 你的电脑得开着。
+#
+# 这个工作流负责兜底：哪怕电脑关了，只要 GitHub 还在，它也会按点去唤醒。
+# 免费（公开仓库的 Actions 额度不限），不需要任何额外账号。
+#
+# 两个已知限制，心里有数就行：
+#   1. GitHub 的定时任务是「尽力而为」，高峰时段可能延迟几分钟到几十分钟。
+#      所以它只适合兜底，别当成精确的闹钟。
+#   2. 仓库连续 60 天没有任何提交活动，GitHub 会自动停掉定时任务。
+#      随便推一次提交就能重新激活。
+
+on:
+  schedule:
+    # cron 一律按 UTC 解释，北京时间 = UTC+8。
+    # 北京时间 09:00-15:55（交易日盘中）→ UTC 01:00-07:55。
+    # 用 5,15,25,... 而不是 */10，是为了避开整点 ——
+    # 整点是 GitHub 最拥堵、定时任务最容易被延迟的时刻。
+    - cron: '5,15,25,35,45,55 1-7 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 唤醒线上实例并确认存活
+        run: |
+          URL="https://wuceng-liti.onrender.com/api/ping"
+          for i in 1 2 3; do
+            code=$(curl -s -o /tmp/body -w '%{http_code}' --max-time 90 "$URL" || echo 000)
+            echo "第 $i 次尝试: HTTP $code  $(cat /tmp/body 2>/dev/null | head -c 120)"
+            if [ "$code" = "200" ] && grep -q longhuitou /tmp/body; then
+              echo "实例已就绪，本次唤醒完成。"
+              exit 0
+            fi
+            echo "还没醒，等 20 秒再试（免费层冷启动约需 1 分钟）。"
+            sleep 20
+          done
+          # 故意 exit 0：这里没醒不代表出错，只是「下次打开要多等一会儿」。
+          # 如果 exit 1，仓库上会挂一片红叉并给你发失败邮件，纯属制造焦虑。
+          echo "三次都没等到 200。不影响使用，只是下次打开可能要等冷启动。"
+          exit 0

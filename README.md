@@ -96,6 +96,46 @@ Windows 上也可以直接双击 `start.ps1`，它会自动选一个可用的 Py
 > Railway 只剩每月 $1 额度、Heroku 早在 2022 年就取消了免费层。
 > **不需要信用卡、还能跑长驻进程的，基本只剩 Render。**
 
+### 部署之后：消灭那 1 分钟冷启动
+
+免费层闲置 15 分钟休眠，你下次打开就要等约 1 分钟。项目自带**两层保活**：
+
+| 机制 | 在哪 | 什么时候起作用 |
+| --- | --- | --- |
+| **本机保活**（主力） | `watchdog.py`，交易时段每 10 分钟戳一次 | 你电脑开着的时候。时间精准，不依赖第三方 |
+| **GitHub 定时任务**（兜底） | `.github/workflows/keepalive.yml` | 你电脑关着的时候。GitHub 免费跑，但可能延迟几分钟 |
+
+**本机保活**默认关闭，开启只要一步：
+
+```powershell
+Copy-Item keepalive.example.json data\keepalive.json
+```
+
+然后按需改 `data\keepalive.json` 里的 `url` 和 `windows`（生效时段，按本机时间）。
+改完最多 30 秒自动生效，**不用重启守护**。随时可以用这个命令看状态：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File task.ps1 watchdog-status
+```
+
+```
+=== 云端保活 ===
+  目标：https://wuceng-liti.onrender.com
+  频率：每 10 分钟一次（仅工作日）
+  时段：09:00-11:35、12:45-15:10
+  最近：成功 HTTP 200（10-18 09:05）
+```
+
+**GitHub 兜底**默认就是开的（工作流已在仓库里），但有两个限制要知道：
+
+- GitHub 的定时任务是「尽力而为」的，高峰时段可能延迟几分钟到几十分钟，只适合兜底；
+- 仓库连续 **60 天**没有任何提交活动，GitHub 会自动停掉定时任务 —— 随便推一次提交就恢复。
+
+> **为什么不干脆 24 小时一直戳醒它？**
+> 免费层每月给 750 实例小时，而一个月约 730 小时 —— 24 小时保活会把额度吃到见底、毫无余地。
+> 只在交易时段保活，一个月才用掉约 100 小时，既够用又安全。
+> 这也是「按需唤醒」比「永不休眠」更合理的地方。
+
 ### 部署到其他平台
 
 仓库里备好了三种入口，按平台任选：
@@ -415,6 +455,8 @@ render.yaml                  Render 免费部署蓝图（一键部署）
 Dockerfile                   给 Koyeb / Back4App / VPS 等平台用
 Procfile                     Heroku 系平台用
 .github/workflows/pages.yml  可选：把 web/ 发布到 GitHub Pages
+.github/workflows/keepalive.yml  兜底：GitHub 定时唤醒线上实例（你的电脑关机时用）
+keepalive.example.json       云端保活配置模板（复制到 data/keepalive.json 即开启）
 ```
 
 ## 接口一览
