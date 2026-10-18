@@ -98,9 +98,6 @@ Windows 上也可以直接双击 `start.ps1`，它会自动选一个可用的 Py
 
 ### 部署之后：消灭那 1 分钟冷启动
 
-> 这一节**只针对 Render**（推荐的线上主力）。Vercel 实测抓不到国内数据，
-> 原因见下文「实测过但不推荐：Vercel」一节。
-
 免费层闲置 15 分钟休眠，你下次打开就要等约 1 分钟。项目自带**两层保活**：
 
 | 机制 | 在哪 | 什么时候起作用 |
@@ -139,72 +136,13 @@ powershell -ExecutionPolicy Bypass -File task.ps1 watchdog-status
 > 只在交易时段保活，一个月才用掉约 100 小时，既够用又安全。
 > 这也是「按需唤醒」比「永不休眠」更合理的地方。
 
-### 实测过但**不推荐**：Vercel
-
-> **结论：Vercel 跑得起来，但抓不到国内行情数据 —— 线上请用 Render。**
-
-Vercel 免费层（Hobby）本来很诱人：冷启动约 **1 秒**（Render 要等约 1 分钟），
-也没有 Cloudflare 免费层那种「50 子请求 / 6 并发 / 10ms CPU」的硬上限
-（本项目一次扫描就要 55 个子请求、16 路并发，Cloudflare 那条路直接走不通）。
-代码也已经适配好了 —— `vercel.json` + `api/` 目录 + `server.py` 里的 WSGI 入口。
-
-**但实测下来数据抓不到**，而且不是偶发：
-
-| 同一时刻、同一份代码 | Vercel | Render |
-| --- | --- | --- |
-| `/api/overview` 连打 4 次（间隔 20s，强制不命中缓存） | **0~1 次正常**，其余涨停 0 家 + `warnings=涨停池数据源不可用` | **4 次全部正常**（涨停 61 / 跌停 10 / 情绪 90） |
-| 8 个交易日逐一真抓涨停池 | **8 次全空** | 8 次全部正确 |
-| 整站扫描 | 服务端耗时 86 秒，**候选 0** | 服务端耗时 0.14 秒，**候选 309 / 命中 24** |
-
-香港 `hkg1` 和新加坡 `sin1` **两个区域都试过，结果一样** —— 所以问题不在区域。
-
-**原因**：Vercel 的函数出口 IP 是共享的，上面跑爬虫的太多，国内数据源
-（东财 `push2ex` 等）对这批 IP 大范围封禁。表现是**静默丢包** —— 不报错、不返回，
-一直挂到超时。更麻烦的是它**按实例随机**：Vercel 每个 `api/*.py` 是独立容器、
-出口 IP 各不相同，所以同一时刻有的接口通、有的不通。这就是页面停在
-「数据源 检测中」背后的原因。
-
-**代码为什么留着**：`server.py` 里的 `make_app()` 是**通用 WSGI 入口**，
-不只服务 Vercel —— 任何能跑 WSGI 的地方（Cloud Run、Railway、PythonAnywhere、
-自己的 VPS、下面的 Docker 那几种）都能直接接上。将来 Vercel 的 IP 问题若缓解，
-改回去即可用，代码不用再动。
-
-<details>
-<summary>真想去试的话，部署步骤（点开）</summary>
-
-1. 打开 <https://vercel.com/new>，用 GitHub 登录（不需要信用卡）
-2. 选 **Import Git Repository**，挑 `szy1088/wuceng-liti`
-3. **其余全部保持默认**（Framework Preset 会自动识别为 Other），点 **Deploy**
-4. 约 1 分钟后拿到 `https://wuceng-liti.vercel.app`
-
-配置一个字段都不用填：
-
-| 文件 | 作用 |
-| --- | --- |
-| `vercel.json` | 静态目录指向 `web/`；区域 `sin1`（新加坡，离行情接口近） |
-| `api/*.py` | 13 个函数入口，一个接口一个文件（Vercel 的 `/api` 目录约定） |
-| `server.py` 的 `make_app()` | WSGI 适配层，把同一张 `ROUTES` 表接上去 |
-
-> **为什么是 13 个文件而不是 1 个？**
-> Vercel 的 `/api` 目录约定是「一个 `.py` 文件 = 一个路由」，没有通配写法。
-> 每个文件只有 3 行，只做一件事：把路由**钉死**，再转交给 `server.py` 里的实现。
-> 「钉死」是刻意的 —— 平台不保证把原始 `PATH_INFO` 原样传进来，靠它分发会翻车。
-> 两条路径（本机 `http.server` / 云端 WSGI）共用同一个 `dispatch_api()`，
-> 接口行为不会两边跑偏。
-
-其他代价：没有持久磁盘（`data/store.json` 存不下来）、内存缓存每次冷启动清空、
-Hobby 仅限非商业个人用途、定时推送不会在云端执行。
-
-</details>
-
 ### 部署到其他平台
 
-仓库里备好了这些入口，按平台任选：
+仓库里备好了三种入口，按平台任选：
 
 | 文件 | 适用平台 |
 | --- | --- |
 | `render.yaml` | Render（一键蓝图） |
-| `vercel.json` + `api/` | Vercel（serverless 函数；能跑，但抓不到国内数据，见上文） |
 | `Dockerfile` | Koyeb / Back4App / Northflank / 自己的 VPS |
 | `Procfile` | Heroku 系 |
 
