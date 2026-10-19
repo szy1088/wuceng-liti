@@ -106,6 +106,9 @@ DEFAULT_SETTINGS = {
     "notifyTimes": "15:05",     # 交易日自动推送时刻，逗号分隔可填多个
     "notifyDays": 10,           # 扫描统计窗口（交易日）
     "notifyScanLimit": 40,      # 扫描候选上限
+    # ---- 龙回头档案：自动把每次扫描的 A/B 级命中按「月 → 日 → 标的」封存 ----
+    "archiveMinScore": 65,      # 收入档案的最低评分（默认与推送阈值一致：B 级）
+    "archiveAuto": True,        # 每次扫描成功后自动存档
 }
 
 _QUOTE_TTL = 3.0
@@ -1522,12 +1525,13 @@ def api_scan(limit: int = 40, days: int = 10, mode: str = "dragon") -> dict:
         v["plan"] = plan_position(v.get("price") or 0, settings, v["score"])
         v["sector"] = candidates.get(v["code"], {}).get("sector", "")
 
-    # 精简K线：列表页只用最后 12 根，详情页按需再取
+    # 精简K线：列表页只用最后 18 根，详情页按需再取；档案里也保留同一份用于缩略图
     for v in dragons + others[:12]:
-        v["bars"] = v.get("bars", [])[-12:]
+        v["bars"] = v.get("bars", [])[-18:]
 
-    return {
+    result = {
         "ok": True,
+        "date": market_date(),
         "elapsed": round(time.time() - started, 2),
         "scanned": len(views),
         "total_candidates": len(candidates),
@@ -1537,6 +1541,15 @@ def api_scan(limit: int = 40, days: int = 10, mode: str = "dragon") -> dict:
         "warnings": warnings,
         "settings": settings,
     }
+
+    # 每次成功扫描后自动归档：同一天同一只股票只留一条，更新「最近命中」，
+    # 同时保留首次命中的时间与价格，形成可回看的龙回头时间轴。
+    try:
+        result["archive"] = _archive_scan(result)
+    except Exception as exc:                            # noqa: BLE001
+        _note_error(exc)
+        result["archive"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return result
 
 
 def api_quote(codes) -> dict:
@@ -1871,66 +1884,419 @@ _DEFAULT_STORE = {
     "positions": [],
     "reviews": [],
     "trades": [],
+    # 结构：{"YYYY-MM": {"YYYY-MM-DD": {"date": ..., "items": {code: {...}}}}}
+    "dragonArchive": {},
 }
+
+# 本地存储的读改写锁。扫描线程（手动 / 定时推送）可能同时归档，而持仓、复盘也会写
+# store.json；没有锁时 load→改→save 会互相覆盖。RLock 允许 save_store 内部再次
+# 调用 load_store，不会死锁。
+_STORE_LOCK = threading.RLock()
 
 
 def load_store() -> dict:
-    try:
-        if os.path.exists(STORE_FILE):
-            # utf-8-sig：用户手工改 store.json（或用 PowerShell 生成）时很容易带上 BOM，
-            # 用纯 "utf-8" 读会让 json.load 直接抛异常，于是整个配置被静默重置成默认值
-            # （推送密钥、持仓、复盘全"丢"）。utf-8-sig 读没有 BOM 的文件也完全正常。
-            with open(STORE_FILE, "r", encoding="utf-8-sig") as fh:
-                data = json.load(fh)
-            merged = dict(_DEFAULT_STORE)
-            merged.update(data)
-            raw = dict(data.get("settings") or {})
-            if "notifyChannels" not in raw:
-                # 旧版是单通道（notifyChannel / notifyKey），升级成列表 + 字典。
-                # 只在「存储里还没有新字段」时迁移，这样用户清空勾选后不会被旧值复活。
-                ch = str(raw.get("notifyChannel") or "off").strip().lower()
-                key = str(raw.get("notifyKey") or "").strip()
-                live = ch not in ("", "off", "none") and bool(key)
-                raw["notifyChannels"] = [ch] if live else []
-                raw["notifyKeys"] = {ch: key} if live else {}
-            merged["settings"] = {**DEFAULT_SETTINGS, **raw}
-            merged["persisted"] = DATA_WRITABLE
-            return merged
-    except Exception as exc:                            # noqa: BLE001
-        _note_error(exc)
-    fallback = dict(_DEFAULT_STORE)
-    fallback["persisted"] = DATA_WRITABLE
-    return fallback
+    with _STORE_LOCK:
+        try:
+            if os.path.exists(STORE_FILE):
+                # utf-8-sig：用户手工改 store.json（或用 PowerShell 生成）时很容易带上 BOM，
+                # 用纯 "utf-8" 读会让 json.load 直接抛异常，于是整个配置被静默重置成默认值
+                # （推送密钥、持仓、复盘全"丢"）。utf-8-sig 读没有 BOM 的文件也完全正常。
+                with open(STORE_FILE, "r", encoding="utf-8-sig") as fh:
+                    data = json.load(fh)
+                merged = dict(_DEFAULT_STORE)
+                merged.update(data)
+                raw = dict(data.get("settings") or {})
+                if "notifyChannels" not in raw:
+                    # 旧版是单通道（notifyChannel / notifyKey），升级成列表 + 字典。
+                    # 只在「存储里还没有新字段」时迁移，这样用户清空勾选后不会被旧值复活。
+                    ch = str(raw.get("notifyChannel") or "off").strip().lower()
+                    key = str(raw.get("notifyKey") or "").strip()
+                    live = ch not in ("", "off", "none") and bool(key)
+                    raw["notifyChannels"] = [ch] if live else []
+                    raw["notifyKeys"] = {ch: key} if live else {}
+                merged["settings"] = {**DEFAULT_SETTINGS, **raw}
+                merged["persisted"] = DATA_WRITABLE
+                return merged
+        except Exception as exc:                        # noqa: BLE001
+            _note_error(exc)
+        fallback = dict(_DEFAULT_STORE)
+        fallback["persisted"] = DATA_WRITABLE
+        return fallback
 
 
 def save_store(payload: dict) -> dict:
-    current = load_store()
-    for key in ("watchlist", "positions", "reviews", "trades"):
-        if key in payload:
-            current[key] = payload[key]
-    if "settings" in payload:
-        # 设置项按「字段」合并，而不是整体替换：前端只提交表单里渲染出来的字段，
-        # 整体替换会把没渲染的项（例如微信 SendKey）静默抹掉。
-        merged = dict(DEFAULT_SETTINGS)
-        merged.update(current.get("settings") or {})
-        for key, value in (payload.get("settings") or {}).items():
-            if value is not None:
-                merged[key] = value
-        current["settings"] = merged
-    global DATA_WRITABLE
+    with _STORE_LOCK:
+        current = load_store()
+        for key in ("watchlist", "positions", "reviews", "trades", "dragonArchive"):
+            if key in payload:
+                current[key] = payload[key]
+        if "settings" in payload:
+            # 设置项按「字段」合并，而不是整体替换：前端只提交表单里渲染出来的字段，
+            # 整体替换会把没渲染的项（例如微信 SendKey）静默抹掉。
+            merged = dict(DEFAULT_SETTINGS)
+            merged.update(current.get("settings") or {})
+            for key, value in (payload.get("settings") or {}).items():
+                if value is not None:
+                    merged[key] = value
+            current["settings"] = merged
+        global DATA_WRITABLE
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(STORE_FILE, "w", encoding="utf-8") as fh:
+                json.dump(current, fh, ensure_ascii=False, indent=2)
+            DATA_WRITABLE = True
+        except OSError as exc:
+            # 云端免费实例的磁盘可能是只读的、或者重启后就清空。存不下去不该让接口 500，
+            # 降级成「本次运行内有效」，并把这个事实告诉前端（页面会提示）。
+            if DATA_WRITABLE:
+                _note_error(exc)
+            DATA_WRITABLE = False
+        current["persisted"] = DATA_WRITABLE
+        return current
+
+
+# ----------------------------------------------------------------------------
+# 龙回头档案：把「月 → 日 → 标的」封存成可展开的卡片
+# ----------------------------------------------------------------------------
+
+_ARCHIVE_SNAPSHOT_LIMIT = 24
+_ARCHIVE_BAR_LIMIT = 18
+
+
+def _archive_stamp() -> str:
+    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _archive_float(value):
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(STORE_FILE, "w", encoding="utf-8") as fh:
-            json.dump(current, fh, ensure_ascii=False, indent=2)
-        DATA_WRITABLE = True
-    except OSError as exc:
-        # 云端免费实例的磁盘可能是只读的、或者重启后就清空。存不下去不该让接口 500，
-        # 降级成「本次运行内有效」，并把这个事实告诉前端（页面会提示）。
-        if DATA_WRITABLE:
-            _note_error(exc)
-        DATA_WRITABLE = False
-    current["persisted"] = DATA_WRITABLE
-    return current
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _archive_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _archive_snapshot(view: dict, at: str) -> dict:
+    """一次命中的瞬时快照：时间 + 股价 + 涨幅 + 评分。"""
+    return {
+        "at": at,
+        "price": _archive_float(view.get("price")),
+        "pct": _archive_float(view.get("pct")),
+        "score": _archive_int(view.get("score")),
+        "vol_ratio": _archive_float(view.get("vol_ratio")),
+    }
+
+
+def _archive_record(view: dict, now: str, prev: dict = None) -> dict:
+    """把扫描结果压缩成档案记录。同一天重复命中时保留首次时间与价格。"""
+    prev = prev or {}
+    snapshots = [s for s in (prev.get("snapshots") or []) if isinstance(s, dict)]
+    snapshots.append(_archive_snapshot(view, now))
+
+    details = []
+    for d in view.get("details") or []:
+        if isinstance(d, dict):
+            details.append({k: d.get(k) for k in
+                            ("key", "label", "score", "max", "note")})
+
+    levels = {}
+    raw_levels = view.get("levels")
+    if isinstance(raw_levels, dict):
+        levels = {k: raw_levels.get(k) for k in
+                  ("ma5", "ma10", "ma20", "box_top", "rally_high",
+                   "steady_buy", "stop_loss", "take_profit_half", "take_profit_full")}
+
+    plan = {}
+    raw_plan = view.get("plan")
+    if isinstance(raw_plan, dict):
+        plan = {k: raw_plan.get(k) for k in
+                ("ok", "max_cash", "starter_qty", "starter_amount",
+                 "add_qty", "full_qty", "full_amount", "reason")}
+
+    bars = []
+    for b in (view.get("bars") or [])[-_ARCHIVE_BAR_LIMIT:]:
+        if isinstance(b, dict):
+            bars.append({k: b.get(k) for k in
+                         ("d", "o", "h", "l", "c", "v", "ma5", "ma10", "ma20")})
+
+    price = _archive_float(view.get("price"))
+    return {
+        "code": str(view.get("code") or "").strip(),
+        "name": str(view.get("name") or "").strip(),
+        "price": price,
+        "pct": _archive_float(view.get("pct")),
+        "turnover": _archive_float(view.get("turnover")),
+        "vol_ratio": _archive_float(view.get("vol_ratio")),
+        "float_cap": _archive_float(view.get("float_cap")),
+        "score": _archive_int(view.get("score")),
+        "grade": str(view.get("grade") or ""),
+        "boards": _archive_int(view.get("boards")),
+        "pullback_days": _archive_int(view.get("pullback_days")),
+        "pullback_pct": _archive_float(view.get("pullback_pct")),
+        "shrink_ratio": _archive_float(view.get("shrink_ratio")),
+        "ma5": _archive_float(view.get("ma5")),
+        "ma10": _archive_float(view.get("ma10")),
+        "ma20": _archive_float(view.get("ma20")),
+        "right_side": bool(view.get("right_side")),
+        "stable": bool(view.get("stable")),
+        "box_top": _archive_float(view.get("box_top")),
+        "rally_high": _archive_float(view.get("rally_high")),
+        "sector": str(view.get("sector") or "").strip(),
+        "advice": str(view.get("advice") or ""),
+        "details": details,
+        "levels": levels,
+        "plan": plan,
+        "bars": bars,
+        # 首次命中：时间与价格永远不覆盖；之后每次扫描只追加快照。
+        "firstMatchedAt": (prev.get("firstMatchedAt")
+                           or prev.get("matchedAt") or now),
+        "lastMatchedAt": now,
+        "firstPrice": (prev.get("firstPrice")
+                       if prev.get("firstPrice") is not None else price),
+        "lastPrice": price,
+        "hitCount": _archive_int(prev.get("hitCount")) + 1,
+        "snapshots": snapshots[-_ARCHIVE_SNAPSHOT_LIMIT:],
+    }
+
+
+def _archive_scan(scan: dict, force: bool = False) -> dict:
+    """把一次扫描中达到档案评分线的标的写入 store。"""
+    settings = load_store().get("settings", {})
+    if not force and not settings.get("archiveAuto", True):
+        return {"ok": True, "saved": False, "skipped": True,
+                "reason": "自动存档已关闭"}
+
+    now = _archive_stamp()
+    date = str(scan.get("date") or market_date())[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        date = _dt.date.today().strftime("%Y-%m-%d")
+    month = date[:7]
+    min_score = _archive_int(settings.get("archiveMinScore"), 65)
+
+    hits = [v for v in (scan.get("items") or [])
+            if isinstance(v, dict) and _archive_int(v.get("score")) >= min_score]
+
+    with _STORE_LOCK:
+        store = load_store()
+        archive = store.get("dragonArchive")
+        if not isinstance(archive, dict):
+            archive = {}
+        month_map = archive.get(month)
+        if not isinstance(month_map, dict):
+            month_map = {}
+        day = month_map.get(date)
+        if not isinstance(day, dict):
+            day = {"date": date, "month": month, "createdAt": now, "items": {}}
+
+        items = day.get("items")
+        if isinstance(items, list):                     # 兼容早期手写格式
+            items = {str(it.get("code")): it for it in items if isinstance(it, dict)}
+        if not isinstance(items, dict):
+            items = {}
+
+        added = updated = 0
+        for view in hits:
+            code = str(view.get("code") or "").strip()
+            if not code:
+                continue
+            prev = items.get(code)
+            items[code] = _archive_record(view, now, prev if isinstance(prev, dict) else None)
+            if isinstance(prev, dict):
+                updated += 1
+            else:
+                added += 1
+
+        if not items:
+            return {"ok": True, "saved": False, "date": date, "month": month,
+                    "added": 0, "updated": 0, "count": 0, "minScore": min_score}
+
+        day["items"] = items
+        day["count"] = len(items)
+        day["bestScore"] = max(_archive_int(v.get("score")) for v in items.values())
+        day["updatedAt"] = now
+        day["lastScan"] = {
+            "at": now,
+            "scanned": _archive_int(scan.get("scanned")),
+            "candidates": _archive_int(scan.get("total_candidates")),
+            "minScore": min_score,
+        }
+        month_map[date] = day
+        archive[month] = month_map
+        saved = save_store({"dragonArchive": archive}).get("persisted", False)
+
+    return {
+        "ok": True,
+        "saved": bool(saved),
+        "date": date,
+        "month": month,
+        "added": added,
+        "updated": updated,
+        "count": len(items),
+        "minScore": min_score,
+    }
+
+
+def _archive_sorted_items(raw) -> list:
+    if isinstance(raw, dict):
+        values = list(raw.values())
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = []
+    values = [v for v in values if isinstance(v, dict) and v.get("code")]
+    values.sort(key=lambda v: (-_archive_int(v.get("score")), str(v.get("code"))))
+    return values
+
+
+def api_archive() -> dict:
+    """返回完整档案树：月份倒序 → 日期倒序 → 标的按评分倒序。"""
+    store = load_store()
+    settings = store.get("settings", {})
+    raw = store.get("dragonArchive")
+    if not isinstance(raw, dict):
+        raw = {}
+
+    months = []
+    for month_key in sorted(raw.keys(), reverse=True):
+        month_map = raw.get(month_key)
+        if not isinstance(month_map, dict):
+            continue
+        days = []
+        for date_key in sorted(month_map.keys(), reverse=True):
+            day = month_map.get(date_key)
+            if not isinstance(day, dict):
+                continue
+            items = _archive_sorted_items(day.get("items"))
+            if not items:
+                continue
+            sectors = []
+            for item in items:
+                sector = str(item.get("sector") or "").strip()
+                if sector and sector not in sectors:
+                    sectors.append(sector)
+            stamps = [str(i.get("lastMatchedAt") or i.get("firstMatchedAt") or "")
+                      for i in items]
+            stamps = [s for s in stamps if s]
+            days.append({
+                "date": str(day.get("date") or date_key),
+                "count": len(items),
+                "bestScore": max(_archive_int(i.get("score")) for i in items),
+                "sectors": sectors[:6],
+                "updatedAt": day.get("updatedAt") or (max(stamps) if stamps else ""),
+                "lastMatchedAt": max(stamps) if stamps else "",
+                "items": items,
+            })
+        if not days:
+            continue
+        total = sum(d["count"] for d in days)
+        months.append({
+            "month": str(month_key),
+            "days": days,
+            "daysCount": len(days),
+            "count": total,
+            "bestScore": max(d["bestScore"] for d in days),
+            "firstDate": days[-1]["date"],
+            "lastDate": days[0]["date"],
+        })
+
+    total_records = sum(m["count"] for m in months)
+    total_days = sum(m["daysCount"] for m in months)
+    best_score = max((m["bestScore"] for m in months), default=0)
+    last_date = months[0]["lastDate"] if months else ""
+    last_match = ""
+    if months and months[0]["days"]:
+        last_match = months[0]["days"][0].get("lastMatchedAt") or ""
+
+    return {
+        "ok": True,
+        "generatedAt": _archive_stamp(),
+        "minScore": _archive_int(settings.get("archiveMinScore"), 65),
+        "auto": bool(settings.get("archiveAuto", True)),
+        "totals": {
+            "months": len(months),
+            "days": total_days,
+            "records": total_records,
+            "bestScore": best_score,
+            "lastDate": last_date,
+            "lastMatchedAt": last_match,
+        },
+        "months": months,
+    }
+
+
+def api_archive_update(payload: dict) -> dict:
+    """档案维护：保存指定扫描 / 删除单条 / 删除整日 / 清空。"""
+    payload = payload or {}
+    action = str(payload.get("action") or "save").strip().lower()
+
+    if action == "save":
+        scan = payload.get("scan")
+        if not isinstance(scan, dict) or not isinstance(scan.get("items"), list):
+            return {"ok": False, "error": "缺少扫描结果，无法存档"}
+        info = _archive_scan(scan, force=True)
+        return {**info, **api_archive()}
+
+    if action not in ("delete", "clear"):
+        return {"ok": False, "error": "未知操作：" + action}
+
+    with _STORE_LOCK:
+        store = load_store()
+        archive = store.get("dragonArchive")
+        if not isinstance(archive, dict):
+            archive = {}
+
+        if action == "clear":
+            save_store({"dragonArchive": {}})
+            return api_archive()
+
+        date = str(payload.get("date") or "")[:10]
+        code = str(payload.get("code") or "").strip()
+        month = date[:7]
+        month_map = archive.get(month)
+        deleted = False
+        if isinstance(month_map, dict) and date in month_map:
+            day = month_map.get(date)
+            if isinstance(day, dict):
+                items = day.get("items")
+                if isinstance(items, list):
+                    items = {str(it.get("code")): it for it in items if isinstance(it, dict)}
+                if not isinstance(items, dict):
+                    items = {}
+                if code:
+                    if code in items:
+                        items.pop(code, None)
+                        deleted = True
+                    if items:
+                        day["items"] = items
+                        day["count"] = len(items)
+                        day["bestScore"] = max(_archive_int(v.get("score"))
+                                               for v in items.values())
+                        day["updatedAt"] = _archive_stamp()
+                        month_map[date] = day
+                    else:
+                        month_map.pop(date, None)
+                        deleted = True
+                else:
+                    month_map.pop(date, None)
+                    deleted = True
+            else:
+                month_map.pop(date, None)
+                deleted = True
+            if month_map:
+                archive[month] = month_map
+            else:
+                archive.pop(month, None)
+            if deleted:
+                save_store({"dragonArchive": archive})
+
+    return api_archive()
 
 
 # ----------------------------------------------------------------------------
@@ -1956,6 +2322,7 @@ ROUTES = {
     "/api/notify": lambda q, b: (api_notify(b) if b is not None
                                  else {"ok": False, "error": "请用 POST 调用 /api/notify"}),
     "/api/store": lambda q, b: (save_store(b) if b else load_store()),
+    "/api/archive": lambda q, b: (api_archive_update(b) if b is not None else api_archive()),
 }
 
 

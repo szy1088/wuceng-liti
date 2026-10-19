@@ -73,6 +73,11 @@
         <span class="lift-no">05</span>
         <span class="lift-body"><b>每日复盘</b><small>盘外功夫</small></span>
       </button>
+
+      <button class="lift-btn lift-archive" data-layer="6" style="--accent:#e2b96b">
+        <span class="lift-no">06</span>
+        <span class="lift-body"><b>龙回头档案</b><small>按月 · 按日收藏</small></span>
+      </button>
     </div>
 
     <div class="lift-foot">
@@ -213,6 +218,7 @@
           <label>统计窗口（交易日） <input type="number" id="scan-days" value="10" min="3" max="15"></label>
           <button class="btn primary" id="btn-scan">▶ 开始扫描龙回头</button>
           <button class="btn ghost" id="btn-push-scan" title="把评分达标的标的推到微信">📤 推送到微信</button>
+          <button class="btn ghost" id="btn-open-archive" title="查看按月 / 按日封存的龙回头档案">🗂 龙回头档案</button>
         </div>
         <div class="scan-note" id="scan-note">扫描对象：近 N 个交易日涨停池中的连板股（前期走牛）+ 今日涨停 + 自选池。</div>
       </div>
@@ -389,6 +395,67 @@
       </div>
     </section>
 
+    <!-- ---------- 龙回头档案 ---------- -->
+    <section class="page archive-page" data-page="6" id="archive-page" data-theme="noir">
+      <div class="archive-shell">
+        <div class="archive-hero">
+          <div class="ah-glow" aria-hidden="true"></div>
+          <div class="ah-seal" aria-hidden="true"><span>龍</span><i>回头</i></div>
+
+          <div class="ah-copy">
+            <div class="eyebrow">Longhuitou Archive · 第六档案</div>
+            <h1>龙回头 · 典藏档案</h1>
+            <p>每一次符合「右侧龙回头」的命中，都会按交易日封存：记住它第一次出现的时间、
+               当时的股价与评分，再按月、按日收进卡片。点开月份展开交易日，点开日期展开当日标的。</p>
+            <div class="ah-actions">
+              <button class="btn archive-primary" id="btn-archive-refresh">↻ 刷新档案</button>
+              <button class="btn ghost" id="btn-archive-export">⇩ 导出 JSON</button>
+              <button class="btn ghost" id="btn-archive-goto-scan">↗ 去扫描</button>
+            </div>
+          </div>
+
+          <div class="ah-stats">
+            <div class="ah-stat">
+              <small>收藏月份</small><b id="arch-stat-months">0</b><em>个月</em>
+            </div>
+            <div class="ah-stat">
+              <small>归档交易日</small><b id="arch-stat-days">0</b><em>天</em>
+            </div>
+            <div class="ah-stat">
+              <small>命中标的</small><b id="arch-stat-records">0</b><em>只</em>
+            </div>
+            <div class="ah-stat">
+              <small>最高评分</small><b id="arch-stat-best">—</b><em>分</em>
+            </div>
+            <div class="ah-last" id="arch-last">最近收录 —</div>
+          </div>
+
+          <div class="ah-theme" role="group" aria-label="档案主题">
+            <span>主题</span>
+            <button class="theme-dot is-active" data-arch-theme="noir"><i></i>鎏金夜</button>
+            <button class="theme-dot" data-arch-theme="celadon"><i></i>青瓷昼</button>
+          </div>
+        </div>
+
+        <div class="archive-toolbar">
+          <label class="arch-search">
+            <span>⌕</span>
+            <input id="archive-search" type="search" placeholder="搜索代码 / 名称 / 板块" autocomplete="off">
+          </label>
+          <div class="arch-filters" id="archive-filters">
+            <button class="is-active" data-arch-grade="all">全部</button>
+            <button data-arch-grade="A">A 级</button>
+            <button data-arch-grade="B">B 级</button>
+          </div>
+          <div class="arch-hint" id="archive-hint">正在读取档案…</div>
+        </div>
+
+        <div class="archive-tree" id="archive-tree">
+          <div class="arch-loading"><i></i><span>正在打开档案柜…</span></div>
+        </div>
+      </div>
+    </section>
+
     <footer class="foot">
       龙回头 · 五层立体短线交易系统　|　行情来自腾讯 / 新浪 / 东方财富公开接口　|　
       本系统只做纪律提示，不构成投资建议，不连接券商、不发送任何委托
@@ -420,6 +487,11 @@
       </div>
     </div>
   </form>
+</dialog>
+
+<!-- ===== 龙回头档案详情 ===== -->
+<dialog id="dlg-archive" class="dlg dlg-archive" data-theme="noir">
+  <div id="archive-detail"></div>
 </dialog>
 
 <div class="toast" id="toast"></div>

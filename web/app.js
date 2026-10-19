@@ -19,6 +19,11 @@ const LAYERS = [
   { page: 5, no: '05', title: '每日复盘', color: '#34d399', hint: '盘外功夫 · 情绪监控' },
 ];
 
+const MONTH_CN = ['壹', '贰', '叁', '肆', '伍', '陆', '柒', '捌', '玖', '拾', '拾壹', '拾贰'];
+const MONTH_EN = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+  'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
 const SETTING_FIELDS = [
   ['capital', '短线总资金（元）', 1000],
   ['maxPositionPct', '单股持仓上限（%）', 5],
@@ -35,6 +40,7 @@ const SETTING_FIELDS = [
   ['pullbackPctMin', '回调幅度下限（%）', 1],
   ['pullbackPctMax', '回调幅度上限（%）', 1],
   ['panicLimitDowns', '跌停退潮阈值（家）', 1],
+  ['archiveMinScore', '档案收录评分下限（分）', 5],
 ];
 
 /* 微信推送通道（只做「系统 → 你」的单向提醒，不接收消息、不登录微信客户端）
@@ -76,6 +82,15 @@ const state = {
   selected: null,
   scanning: false,
   chart: null,
+  /* 龙回头档案 */
+  archive: null,
+  archiveAt: 0,
+  archiveQuery: '',
+  archiveGrade: 'all',
+  archiveTheme: 'noir',
+  archiveOpen: { months: {}, days: {} },
+  archiveInit: false,
+  archiveDetail: null,
 };
 
 const _loaded = {};
@@ -237,6 +252,7 @@ function onEnterPage(page) {
   else if (page === 3) { renderCalc(); loadPositions(); }
   else if (page === 4) { loadDiscipline(); }
   else if (page === 5) { loadDragons(); renderReviews(); syncReviewDefaults(); loadOverview(); }
+  else if (page === 6) { loadArchive(); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -565,7 +581,14 @@ async function runScan() {
     state.scan = d;
     renderScan(d);
     if (d.warnings && d.warnings.length) toast(d.warnings.join('；'), true);
-    else toast(`扫描完成：命中 ${d.count} 只（耗时 ${d.elapsed}s）`);
+    else {
+      const a = d.archive || {};
+      const arch = a.ok && !a.skipped
+        ? ` · 档案 +${a.added || 0} / 更新 ${a.updated || 0}`
+        : (a.skipped ? '' : '');
+      toast(`扫描完成：命中 ${d.count} 只（耗时 ${d.elapsed}s）${arch}`);
+    }
+    if (state.archive) { state.archiveAt = 0; if (state.page === 6) loadArchive(true); }
   } catch (e) {
     $('#scan-result').innerHTML = `<div class="empty">扫描失败：${esc(e.message)}</div>`;
     $('#scan-tag').textContent = '扫描失败';
@@ -582,7 +605,10 @@ function renderScan(d) {
   tag.textContent = `命中 ${d.count} · 扫描 ${d.scanned} · ${d.elapsed}s`;
 
   const note = $('#scan-note');
-  if (note) note.innerHTML = `扫描对象：近 ${(d.settings && d.settings.pullbackDaysMax) || 10} 日窗口内涨停池中的连板股 + 今日涨停 + 自选池　|　候选 ${d.total_candidates} 只，实际评分 ${d.scanned} 只。`;
+  if (note) note.innerHTML = `扫描对象：近 ${(d.settings && d.settings.pullbackDaysMax) || 10} 日窗口内涨停池中的连板股 + 今日涨停 + 自选池　|　候选 ${d.total_candidates} 只，实际评分 ${d.scanned} 只。` +
+    (d.archive && d.archive.ok && !d.archive.skipped
+      ? `　|　已自动封存到 <b style="color:#f7c46a">${esc(d.archive.date)}</b> 档案（+${d.archive.added} / 更新 ${d.archive.updated}）。`
+      : '');
 
   const items = d.items || [];
   const others = d.others || [];
@@ -1570,6 +1596,421 @@ function renderReviews() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 龙回头档案                                                           */
+/* ------------------------------------------------------------------ */
+
+function archTime(value) {
+  const s = String(value || '');
+  if (s.length >= 16) return s.slice(11, 16);
+  if (s.length >= 10) return s.slice(5, 10);
+  return '—';
+}
+
+function archDateLabel(date) {
+  const s = String(date || '');
+  return s.length >= 10 ? `${s.slice(0, 4)}年${Number(s.slice(5, 7))}月${Number(s.slice(8, 10))}日` : (s || '—');
+}
+
+function applyArchiveTheme(theme, persist) {
+  const next = theme === 'celadon' ? 'celadon' : 'noir';
+  state.archiveTheme = next;
+  const page = $('#archive-page');
+  if (page) page.dataset.theme = next;
+  const dlg = $('#dlg-archive');
+  if (dlg) dlg.dataset.theme = next;
+  $$('[data-arch-theme]').forEach((b) => b.classList.toggle('is-active', b.dataset.archTheme === next));
+  if (persist) {
+    try { localStorage.setItem('lht.archive.theme', next); } catch (e) { /* 隐私模式下忽略 */ }
+  }
+}
+
+async function loadArchive(force) {
+  const tree = $('#archive-tree');
+  const hint = $('#archive-hint');
+  if (force && hint) hint.textContent = '正在刷新档案…';
+  if (!force && state.archive && Date.now() - state.archiveAt < 15000) return renderArchive();
+  if (!state.archive && tree) {
+    tree.innerHTML = '<div class="arch-loading"><i></i><span>正在打开档案柜…</span></div>';
+  }
+  try {
+    const d = await api('/api/archive');
+    if (!d.ok) throw new Error(d.error || '接口异常');
+    state.archive = d;
+    state.archiveAt = Date.now();
+    if (!state.archiveInit) {
+      state.archiveInit = true;
+      const m = (d.months || [])[0];
+      if (m) {
+        state.archiveOpen.months[m.month] = true;
+        if (m.days && m.days[0]) state.archiveOpen.days[m.days[0].date] = true;
+      }
+    }
+    renderArchive();
+  } catch (e) {
+    if (tree) {
+      tree.innerHTML = `<div class="arch-empty"><div class="ae-seal">龍</div><h3>档案读取失败</h3>
+        <p>${esc(e.message)}</p><button class="btn archive-primary" data-arch-retry>重新读取</button></div>`;
+    }
+    if (hint) hint.textContent = '读取失败';
+  }
+}
+
+function archiveMatch(item) {
+  const g = gradeOf(item.score).letter;
+  if (state.archiveGrade !== 'all' && g !== state.archiveGrade) return false;
+  const q = state.archiveQuery.trim().toLowerCase();
+  if (!q) return true;
+  return [item.code, item.name, item.sector]
+    .some((v) => String(v || '').toLowerCase().includes(q));
+}
+
+function archiveHeat(month, days) {
+  const parts = String(month).split('-').map(Number);
+  const y = parts[0];
+  const mo = parts[1];
+  const total = new Date(y, mo, 0).getDate();
+  const counts = {};
+  days.forEach((d) => { counts[d.date] = (d.items || []).length; });
+  let cells = '';
+  for (let i = 1; i <= total; i++) {
+    const key = `${month}-${String(i).padStart(2, '0')}`;
+    const n = counts[key] || 0;
+    const lv = n >= 4 ? 'lv3' : (n >= 2 ? 'lv2' : (n ? 'has' : ''));
+    cells += `<i class="${lv}" title="${esc(key)}${n ? ` · ${n} 只` : ''}"></i>`;
+  }
+  return `<span class="am-heat" aria-hidden="true">${cells}</span>`;
+}
+
+function archiveStockCard(item, date) {
+  const g = gradeOf(item.score);
+  const signal = item.right_side ? '放量起爆' : (item.stable ? '缩量止跌' : '等待确认');
+  const shrink = item.shrink_ratio === null || item.shrink_ratio === undefined
+    ? '—' : `${Math.round(Number(item.shrink_ratio) * 100)}%`;
+  return `<article class="arch-stock grade-${g.letter}"
+       data-arch-open="${esc(date)}" data-arch-code="${esc(item.code)}"
+       data-code="${esc(item.code)}" role="button" tabindex="0"
+       aria-label="${esc(item.name)} ${esc(item.code)} 档案详情">
+    <div class="as-head">
+      <div class="as-score" style="--p:${Math.max(0, Math.min(100, Number(item.score) || 0))}">
+        <span>${fmt(item.score, 0)}<small>分</small></span>
+      </div>
+      <div class="as-id"><b>${esc(item.name || '—')}</b><small>${esc(item.code || '')}</small></div>
+      <span class="as-grade">${g.letter}</span>
+    </div>
+    <div class="as-price">
+      <b>${fmt(item.price)}</b>
+      <em class="${tone(item.pct)}">${sgn(item.pct)}%</em>
+      <span>首次 ${archTime(item.firstMatchedAt)}</span>
+    </div>
+    <div class="as-tags">
+      <span>${Number(item.boards) || 0} 连板</span>
+      <span>回调 ${Number(item.pullback_days) || 0} 日</span>
+      <span>幅度 ${fmt(item.pullback_pct, 1)}%</span>
+      <span>缩量 ${shrink}</span>
+    </div>
+    <div class="as-foot">
+      <span class="as-sector">${esc(item.sector || '未归类板块')}</span>
+      <span class="as-signal">${signal}</span>
+    </div>
+  </article>`;
+}
+
+function archiveDayCard(day) {
+  const open = !!state.archiveOpen.days[day.date];
+  const dt = new Date(day.date + 'T00:00:00');
+  const week = isNaN(dt.getTime()) ? '' : WEEK_CN[dt.getDay()];
+  const firsts = day.items.map((x) => x.firstMatchedAt).filter(Boolean).sort();
+  const lasts = day.items.map((x) => x.lastMatchedAt || x.firstMatchedAt).filter(Boolean).sort();
+  const sectors = (day.sectors || []).slice(0, 3)
+    .map((s) => `<span>${esc(s)}</span>`).join('');
+  return `<article class="arch-day${open ? ' is-open' : ''}">
+    <button class="ad-head" data-arch-day="${esc(day.date)}" aria-expanded="${open}">
+      <span class="ad-date"><b>${esc(day.date.slice(8, 10))}</b><small>${week}</small></span>
+      <span class="ad-meta">
+        <b>${day.items.length} 只命中<em>最高 ${day.bestScore} 分</em></b>
+        <small>首次收录 ${archTime(firsts[0])} · 最近确认 ${archTime(lasts[lasts.length - 1])}</small>
+      </span>
+      <span class="ad-sectors">${sectors}</span>
+      <span class="ad-chev">⌄</span>
+    </button>
+    <div class="ad-body">
+      <div class="ad-actions">
+        <span>${esc(archDateLabel(day.date))} · 最近更新 ${archTime(day.updatedAt)}</span>
+        <button class="ad-del" data-arch-del-day="${esc(day.date)}">删除本日档案</button>
+      </div>
+      <div class="arch-stocks">${day.items.map((it) => archiveStockCard(it, day.date)).join('')}</div>
+    </div>
+  </article>`;
+}
+
+function archiveMonthCard(month, days) {
+  const open = !!state.archiveOpen.months[month.month];
+  const parts = String(month.month).split('-');
+  const year = parts[0] || '—';
+  const mo = Number(parts[1]) || 1;
+  const cn = MONTH_CN[mo - 1] || String(mo);
+  const en = MONTH_EN[mo - 1] || '';
+  const count = days.reduce((sum, d) => sum + d.items.length, 0);
+  const best = Math.max(0, ...days.map((d) => Number(d.bestScore) || 0));
+  return `<section class="arch-month${open ? ' is-open' : ''}">
+    <button class="am-head" data-arch-month="${esc(month.month)}" aria-expanded="${open}">
+      <span class="am-seal">${cn}月</span>
+      <span class="am-title">
+        <small>${esc(year)}</small>
+        <b>${cn}月</b>
+        <em>${en} / ${parts[1] || ''}</em>
+      </span>
+      <span class="am-metrics">
+        <span><b>${days.length}</b><small>归档交易日</small></span>
+        <span><b>${count}</b><small>命中标的</small></span>
+        <span><b>${best || '—'}</b><small>最高评分</small></span>
+      </span>
+      ${archiveHeat(month.month, days)}
+      <span class="am-chev">⌄</span>
+    </button>
+    <div class="am-body">
+      <div class="arch-days">${days.map(archiveDayCard).join('')}</div>
+    </div>
+  </section>`;
+}
+
+function renderArchive() {
+  const tree = $('#archive-tree');
+  if (!tree) return;
+  const d = state.archive;
+  if (!d) {
+    tree.innerHTML = '<div class="arch-loading"><i></i><span>正在打开档案柜…</span></div>';
+    return;
+  }
+
+  const t = d.totals || {};
+  const setText = (sel, value) => { const el = $(sel); if (el) el.textContent = value; };
+  setText('#arch-stat-months', t.months || 0);
+  setText('#arch-stat-days', t.days || 0);
+  setText('#arch-stat-records', t.records || 0);
+  setText('#arch-stat-best', t.bestScore ? t.bestScore : '—');
+  setText('#arch-last', t.lastDate
+    ? `最近收录 ${t.lastDate}${t.lastMatchedAt ? ' · ' + archTime(t.lastMatchedAt) : ''}`
+    : '最近收录 —');
+
+  $$('#archive-filters [data-arch-grade]').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.dataset.archGrade === state.archiveGrade);
+  });
+
+  const months = (d.months || []).map((month) => {
+    const days = (month.days || []).map((day) => {
+      const items = (day.items || []).filter(archiveMatch);
+      return items.length ? { ...day, items } : null;
+    }).filter(Boolean);
+    return days.length ? { ...month, days } : null;
+  }).filter(Boolean);
+
+  const filtered = !!state.archiveQuery.trim() || state.archiveGrade !== 'all';
+  const shown = months.reduce((sum, m) =>
+    sum + m.days.reduce((s, day) => s + day.items.length, 0), 0);
+
+  const hint = $('#archive-hint');
+  if (hint) {
+    hint.textContent = filtered
+      ? `筛选 ${shown} 条 / 共 ${t.records || 0} 条`
+      : `收录评分 ≥ ${d.minScore ?? 65} 分 · 共 ${t.records || 0} 条${d.auto ? ' · 扫描后自动存档' : ' · 自动存档已关闭'}`;
+  }
+
+  if (!(d.months || []).length) {
+    tree.innerHTML = `<div class="arch-empty">
+      <div class="ae-seal">龍</div>
+      <h3>档案柜还是空的</h3>
+      <p>去第二层执行一次「龙回头扫描」。达到档案评分线的标的会自动封存，
+         首次命中时间、股价、评分与买点都会一起记录下来。</p>
+      <button class="btn archive-primary" data-goto="2">去扫描并开启档案</button>
+    </div>`;
+    return;
+  }
+
+  if (!months.length) {
+    tree.innerHTML = `<div class="arch-empty">
+      <div class="ae-seal">寻</div>
+      <h3>没有匹配的记录</h3>
+      <p>换一个代码、名称或板块关键词试试，或把评级筛选切回「全部」。</p>
+      <button class="btn archive-primary" data-arch-reset>清除筛选</button>
+    </div>`;
+    return;
+  }
+
+  tree.innerHTML = months.map((m) => archiveMonthCard(m, m.days)).join('');
+}
+
+function findArchiveHit(date, code) {
+  const months = state.archive ? (state.archive.months || []) : [];
+  for (const month of months) {
+    const day = (month.days || []).find((d) => d.date === date);
+    if (!day) continue;
+    const item = (day.items || []).find((x) => String(x.code) === String(code));
+    if (item) return { item, day, month };
+  }
+  return null;
+}
+
+function openArchiveDetail(date, code) {
+  const hit = findArchiveHit(date, code);
+  if (!hit) { toast('这条档案已经不存在了', true); return; }
+  const { item, day } = hit;
+  const g = gradeOf(item.score);
+  const L = item.levels || {};
+  const plan = item.plan || {};
+  const details = (item.details || []).map((x) => {
+    const max = Number(x.max) || 0;
+    const sc = Number(x.score) || 0;
+    const ratio = max ? Math.max(0, Math.min(100, sc / max * 100)) : 0;
+    return `<div>
+      <div class="si-top"><b>${esc(x.key)}</b><span>${esc(x.label)}</span><span class="si-val">${sc} / ${max}</span></div>
+      <div class="si-bar"><div class="si-fill" style="width:${ratio}%"></div></div>
+      <div class="si-note">${esc(x.note)}</div>
+    </div>`;
+  }).join('');
+
+  const snaps = (item.snapshots || []).slice().reverse().slice(0, 16).map((s) => `
+    <div class="adh-snap">
+      <span>${esc(s.at || '')}</span>
+      <b>${fmt(s.price)}</b>
+      <em class="${tone(s.pct)}">${sgn(s.pct)}%</em>
+      <b>${Number(s.score) || 0} 分</b>
+    </div>`).join('');
+
+  const kv = [
+    ['所属板块', esc(item.sector || '—')],
+    ['连板高度', `${Number(item.boards) || 0} 板`],
+    ['回调天数', `${Number(item.pullback_days) || 0} 日`],
+    ['回调幅度', `${fmt(item.pullback_pct, 1)}%`],
+    ['缩量比', item.shrink_ratio === null || item.shrink_ratio === undefined
+      ? '—' : `${(Number(item.shrink_ratio) * 100).toFixed(0)}%（回调均量 / 拉升天量）`],
+    ['MA5 / MA10 / MA20', `${fmt(item.ma5)} / ${fmt(item.ma10)} / ${fmt(item.ma20)}`],
+    ['流通市值', `${fmt(item.float_cap, 1)} 亿`],
+    ['换手 / 量比', `${fmt(item.turnover, 2)}% / ${fmt(item.vol_ratio, 2)}`],
+    ['洗盘箱体上沿', fmt(item.box_top)],
+    ['拉升期最高价', fmt(item.rally_high)],
+  ].map(([k, val]) => `<dt>${k}</dt><dd>${val}</dd>`).join('');
+
+  const buys = `
+    <div class="adh-bps">
+      <div class="bp"><div class="bp-lab">稳健买点</div><div class="bp-val">${fmt(L.steady_buy)}</div></div>
+      <div class="bp"><div class="bp-lab">放量突破位</div><div class="bp-val">${fmt(L.box_top)}</div></div>
+      <div class="bp sl"><div class="bp-lab">止损价</div><div class="bp-val">${fmt(L.stop_loss)}</div></div>
+      <div class="bp tp"><div class="bp-lab">止盈 1 / 2</div><div class="bp-val">${fmt(L.take_profit_half)} / ${fmt(L.take_profit_full)}</div></div>
+    </div>`;
+
+  const planHtml = plan.ok ? `
+    <div class="adh-kv" style="margin-top:11px">
+      <dt>首笔观察哨</dt><dd>${plan.starter_qty || 0} 股 / ${fmt(plan.starter_amount, 0)} 元</dd>
+      <dt>确认后补足</dt><dd>${plan.add_qty || 0} 股</dd>
+      <dt>单股上限</dt><dd>${plan.full_qty || 0} 股 / ${fmt(plan.full_amount, 0)} 元</dd>
+    </div>` : '';
+
+  const body = `<div class="arch-detail">
+    <div class="adh-top">
+      <div class="adh-score grade-${g.letter}" style="--p:${Math.max(0, Math.min(100, Number(item.score) || 0))}">
+        <span>${fmt(item.score, 0)}<small>分</small></span>
+      </div>
+      <div class="adh-id">
+        <h2>${esc(item.name || '—')}<span>${esc(item.code || '')}</span></h2>
+        <p>${esc(archDateLabel(day.date))} · 首次命中 <b>${esc(item.firstMatchedAt || '—')}</b>
+           · 最近确认 <b>${esc(item.lastMatchedAt || '—')}</b> · 累计命中 <b>${Number(item.hitCount) || 1}</b> 次</p>
+      </div>
+      <button class="adh-close" data-arch-close aria-label="关闭">×</button>
+    </div>
+
+    <div class="adh-price">
+      <b>${fmt(item.price)}</b>
+      <em class="${tone(item.pct)}">${sgn(item.pct)}%</em>
+      <span>首次命中价 ${fmt(item.firstPrice)}<br>${esc(item.grade || g.letter + ' 级')}</span>
+    </div>
+
+    <div class="adh-grid">
+      <div>
+        <div class="adh-sec">
+          <h3>命中时的日 K 与关键位</h3>
+          <canvas class="chart" id="arch-detail-chart"></canvas>
+          ${buys}
+          <div class="adh-verdict">${esc(item.advice || '档案未记录操作建议。')}</div>
+          ${planHtml}
+        </div>
+      </div>
+      <div>
+        <div class="adh-sec">
+          <h3>评分明细 · ${fmt(item.score, 0)} / 100</h3>
+          <div class="adh-score-list">${details || '<div class="empty">未记录评分明细</div>'}</div>
+        </div>
+        <div class="adh-sec" style="margin-top:12px">
+          <h3>关键要素</h3>
+          <dl class="adh-kv">${kv}</dl>
+        </div>
+        <div class="adh-sec" style="margin-top:12px">
+          <h3>命中快照 · 时间 / 股价 / 评分</h3>
+          <div class="adh-snaps">${snaps || '<div class="empty">未记录快照</div>'}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="adh-actions">
+      <button class="btn ghost" data-watch="${esc(item.code)}">☆ 加入自选</button>
+      <button class="btn ghost" data-arch-live="${esc(item.code)}">↗ 查看实时分析</button>
+      <button class="btn danger" data-arch-del-record="${esc(day.date)}|${esc(item.code)}">删除该条记录</button>
+      <span class="muted" style="margin-left:auto">档案只记录历史，不构成当前买卖建议</span>
+    </div>
+  </div>`;
+
+  const box = $('#archive-detail');
+  if (!box) return;
+  box.innerHTML = body;
+  const dlg = $('#dlg-archive');
+  dlg.dataset.theme = state.archiveTheme;
+  state.archiveDetail = {
+    bars: item.bars || [],
+    boxTop: item.box_top,
+    rallyHigh: item.rally_high,
+  };
+  if (dlg.showModal) dlg.showModal();
+  const paint = () => {
+    const canvas = $('#arch-detail-chart');
+    if (canvas) drawChart(canvas, state.archiveDetail);
+  };
+  // showModal 之后布局已完成；再补一帧，兼顾刷新率较低或被节流的标签页。
+  paint();
+  setTimeout(paint, 80);
+}
+
+async function deleteArchive(date, code) {
+  const what = code ? `${code} 在 ${date} 的档案记录` : `${date} 整天的档案`;
+  if (!window.confirm(`确定删除${what}？此操作不可撤销。`)) return;
+  try {
+    const d = await postJSON('/api/archive', { action: 'delete', date, code: code || '' });
+    if (!d.ok) throw new Error(d.error || '删除失败');
+    state.archive = d;
+    state.archiveAt = Date.now();
+    const dlg = $('#dlg-archive');
+    if (dlg && dlg.open) dlg.close();
+    renderArchive();
+    toast('档案已更新');
+  } catch (e) {
+    toast('删除失败：' + e.message, true);
+  }
+}
+
+function exportArchive() {
+  if (!state.archive) { toast('档案尚未加载', true); return; }
+  const blob = new Blob([JSON.stringify(state.archive, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `longhuitou-archive-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('档案已导出为 JSON');
+}
+
+/* ------------------------------------------------------------------ */
 /* 设置                                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -1814,6 +2255,83 @@ function bindEvents() {
     const reload = t.closest('[data-reload]');
     if (reload) { loadHot(true); return; }
 
+    /* --- 龙回头档案 --- */
+    const themeBtn = t.closest('[data-arch-theme]');
+    if (themeBtn) { applyArchiveTheme(themeBtn.dataset.archTheme, true); return; }
+
+    const gradeBtn = t.closest('[data-arch-grade]');
+    if (gradeBtn) { state.archiveGrade = gradeBtn.dataset.archGrade || 'all'; renderArchive(); return; }
+
+    const resetBtn = t.closest('[data-arch-reset]');
+    if (resetBtn) {
+      state.archiveQuery = '';
+      state.archiveGrade = 'all';
+      const input = $('#archive-search');
+      if (input) input.value = '';
+      renderArchive();
+      return;
+    }
+
+    const retryBtn = t.closest('[data-arch-retry]');
+    if (retryBtn) { loadArchive(true); return; }
+
+    const delDay = t.closest('[data-arch-del-day]');
+    if (delDay) { deleteArchive(delDay.dataset.archDelDay || '', ''); return; }
+
+    const delRec = t.closest('[data-arch-del-record]');
+    if (delRec) {
+      const [date, code] = String(delRec.dataset.archDelRecord || '').split('|');
+      deleteArchive(date, code);
+      return;
+    }
+
+    const archClose = t.closest('[data-arch-close]');
+    if (archClose) {
+      const dlg = $('#dlg-archive');
+      if (dlg && dlg.open) dlg.close();
+      return;
+    }
+
+    const archLive = t.closest('[data-arch-live]');
+    if (archLive) {
+      const dlg = $('#dlg-archive');
+      if (dlg && dlg.open) dlg.close();
+      selectStock(archLive.dataset.archLive);
+      return;
+    }
+
+    const monthToggle = t.closest('[data-arch-month]');
+    if (monthToggle) {
+      const key = monthToggle.dataset.archMonth;
+      const opening = !state.archiveOpen.months[key];
+      state.archiveOpen.months[key] = opening;
+      if (opening && state.archive) {
+        const month = (state.archive.months || []).find((m) => m.month === key);
+        const hasOpen = month && (month.days || []).some((d) => state.archiveOpen.days[d.date]);
+        if (month && !hasOpen) {
+          const first = (month.days || []).find((d) =>
+            (d.items || []).some(archiveMatch));
+          if (first) state.archiveOpen.days[first.date] = true;
+        }
+      }
+      renderArchive();
+      return;
+    }
+
+    const dayToggle = t.closest('[data-arch-day]');
+    if (dayToggle) {
+      const key = dayToggle.dataset.archDay;
+      state.archiveOpen.days[key] = !state.archiveOpen.days[key];
+      renderArchive();
+      return;
+    }
+
+    const archOpen = t.closest('[data-arch-open]');
+    if (archOpen) {
+      openArchiveDetail(archOpen.dataset.archOpen, archOpen.dataset.archCode);
+      return;
+    }
+
     const stock = t.closest('[data-code]');
     if (stock && stock.dataset.code) { selectStock(stock.dataset.code); return; }
   });
@@ -1836,6 +2354,26 @@ function bindEvents() {
 
   $('#btn-scan').addEventListener('click', runScan);
   $('#btn-eval').addEventListener('click', () => loadDiscipline(true));
+
+  /* --- 龙回头档案 --- */
+  $('#btn-open-archive').addEventListener('click', () => switchPage(6));
+  $('#btn-archive-refresh').addEventListener('click', () => loadArchive(true));
+  $('#btn-archive-export').addEventListener('click', exportArchive);
+  $('#btn-archive-goto-scan').addEventListener('click', () => switchPage(2));
+  $('#archive-search').addEventListener('input', (ev) => {
+    state.archiveQuery = String(ev.target.value || '');
+    renderArchive();
+  });
+  $('#dlg-archive').addEventListener('click', (ev) => {
+    if (ev.target && ev.target.id === 'dlg-archive') ev.currentTarget.close();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    const card = ev.target.closest ? ev.target.closest('[data-arch-open]') : null;
+    if (!card) return;
+    ev.preventDefault();
+    openArchiveDetail(card.dataset.archOpen, card.dataset.archCode);
+  });
 
   /* --- 微信推送 --- */
   $('#btn-test-push').addEventListener('click', async (ev) => {
@@ -1910,6 +2448,10 @@ function bindEvents() {
     clearTimeout(rt);
     rt = setTimeout(() => {
       if (state.chart) drawChart($('#stock-chart'), state.chart);
+      const adlg = $('#dlg-archive');
+      if (adlg && adlg.open && state.archiveDetail) {
+        drawChart($('#arch-detail-chart'), state.archiveDetail);
+      }
     }, 160);
   });
 }
@@ -1947,6 +2489,10 @@ async function quickPosition(code) {
 async function boot() {
   renderTower();
   bindEvents();
+
+  let archiveTheme = 'noir';
+  try { archiveTheme = localStorage.getItem('lht.archive.theme') || 'noir'; } catch (e) { /* 忽略 */ }
+  applyArchiveTheme(archiveTheme, false);
 
   const today = new Date().toISOString().slice(0, 10);
   const pd = $('#pos-date');

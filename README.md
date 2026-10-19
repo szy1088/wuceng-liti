@@ -419,6 +419,41 @@ powershell -ExecutionPolicy Bypass -File task.ps1 -Action watchdog-uninstall
 > 推送失败不会中断任何流程：通道未开、密钥为空、接口报错都会收敛成一条
 > 可读的提示（例如 `HTTP 400 [AUTH]错误的Key`），只在页面上弹一下 toast。
 
+## 龙回头档案（按月 / 按日收藏）
+
+第二层每次扫描成功后，评分达到档案线（默认 **65 分，即 B 级及以上**）的标的会自动封存。
+左侧电梯的 **06 龙回头档案** 就是档案室：
+
+- **月份卡**：点一下展开当月所有交易日；月份卡上带交易日热力格、命中数量与最高评分。
+- **日期卡**：点一下展开当天的全部命中标的；再点收起。
+- **标的卡**：显示首次命中的时间、当时股价、涨幅、连板高度、回调天数 / 幅度、缩量比、板块与买点状态。
+- **详情**：点标的卡打开详情，包含命中时的日 K、七项评分明细、关键价位、仓位测算，以及
+  「时间 / 股价 / 评分」的历次命中快照。
+- **两套主题**：右上角可切换 **鎏金夜**（暗金档案室）与 **青瓷昼**（浅色青瓷），选择会记在浏览器里。
+- **检索与导出**：支持按代码 / 名称 / 板块搜索、按 A/B 级筛选，并可一键导出完整档案 JSON。
+
+档案存在 `data/store.json` 的 `dragonArchive` 字段里，结构是：
+
+```
+dragonArchive
+└─ 2026-10                        月份
+   └─ 2026-10-19                  交易日
+      ├─ createdAt / updatedAt
+      └─ items
+         └─ 600519                单只标的
+            ├─ firstMatchedAt    首次命中的时间（永不覆盖）
+            ├─ firstPrice        首次命中时的股价
+            ├─ lastMatchedAt     最近一次确认的时间
+            ├─ hitCount / snapshots  命中次数与逐次快照
+            ├─ score / details   评分与七项证据链
+            ├─ levels / plan     当时的关键价位与仓位测算
+            └─ bars              命中时的日 K（用于详情缩略图）
+```
+
+同一天同一只股票只保留一条：后续扫描会更新「最近确认」并追加快照，不会重复占卡。
+档案线可在 **⚙ 策略参数 → 档案收录评分下限** 调整；把 `archiveAuto` 设为 `false`
+可关闭自动存档（仍可通过 `POST /api/archive` 手动保存）。
+
 ## 重要边界
 
 - 本系统**只做纪律提示，不构成投资建议**；
@@ -437,10 +472,10 @@ push.py                      微信推送通道（Server酱 / PushPlus / 企业�
 scan_push.py                 命令行：扫描一次并推送（可挂任务计划程序）
 watchdog.py                  守护进程：主守护（看服务）+ 保镖（看主守护），双进程互保
 task.ps1                     守护安装 / 定时任务 / 开机自启管理
-web/index.html               页面结构（五个图层 + 总览 + 设置对话框）
-web/styles.css               五层立体主题样式（CSS 3D 等距塔 + 深空驾驶舱）
-web/app.js                   前端逻辑（电梯切换、3D 塔、canvas K 线、悬停预览、表单持久化）
-data/store.json              本地持久化（参数 / 自选 / 持仓 / 复盘 / 交易 / 推送配置）
+web/index.html               页面结构（五个图层 + 总览 + 龙回头档案 + 设置对话框）
+web/styles.css               五层立体主题样式（CSS 3D 等距塔 + 深空驾驶舱 + 档案双主题）
+web/app.js                   前端逻辑（电梯切换、3D 塔、canvas K 线、悬停预览、档案卡片、表单持久化）
+data/store.json              本地持久化（参数 / 自选 / 持仓 / 复盘 / 交易 / 推送配置 / 龙回头档案）
 data/watchdog.pid            主守护 PID（进程互保用，自动维护）
 data/watchdog.guard.pid      保镖 PID（自动维护）
 data/watchdog.off            存在即让守护待机（维护开关，删除即恢复）
@@ -473,6 +508,8 @@ keepalive.example.json       云端保活配置模板（复制到 data/keepalive
 | GET | `/api/preview?code=` | 悬停预览用：快照 + 末 40 根日K（日K 600s 缓存） |
 | GET | `/api/minute?code=` | 悬停预览用：当日分时（242 个分钟点 + 均价线，60s 缓存） |
 | GET | `/api/stock?code=` | 单只股票的完整评分视图 + K 线 |
+| GET | `/api/archive` | 龙回头档案树（月份 → 日期 → 标的） |
+| POST | `/api/archive` | 档案维护：`{"action":"save","scan":{...}}` / `{"action":"delete","date":"YYYY-MM-DD","code":"600000"}` / `{"action":"clear"}` |
 | POST | `/api/evaluate` | 持仓纪律诊断（第四层） |
 | POST | `/api/notify` | 微信推送：`{"test":true}` 测试通道，`{"scan":true}` 扫描并推送 |
 | GET/POST | `/api/store` | 读取 / 保存本地配置（`settings` 按字段合并，其余按 key 整体替换） |

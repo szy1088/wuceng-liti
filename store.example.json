@@ -33,10 +33,14 @@
     "notifyTopN": 8,
     "notifyTimes": "15:05",
     "notifyDays": 10,
-    "notifyScanLimit": 40
+    "notifyScanLimit": 40,
+
+    "archiveMinScore": 65,
+    "archiveAuto": true
   },
   "watchlist": [],
   "positions": [],
   "reviews": [],
-  "trades": []
+  "trades": [],
+  "dragonArchive": {}
 }
