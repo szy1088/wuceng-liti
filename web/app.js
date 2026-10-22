@@ -607,7 +607,8 @@ function renderScan(d) {
   const note = $('#scan-note');
   if (note) note.innerHTML = `扫描对象：近 ${(d.settings && d.settings.pullbackDaysMax) || 10} 日窗口内涨停池中的连板股 + 今日涨停 + 自选池　|　候选 ${d.total_candidates} 只，实际评分 ${d.scanned} 只。` +
     (d.archive && d.archive.ok && !d.archive.skipped
-      ? `　|　已自动封存到 <b style="color:#f7c46a">${esc(d.archive.date)}</b> 档案（+${d.archive.added} / 更新 ${d.archive.updated}）。`
+      ? `　|　已自动封存到 <b style="color:#f7c46a">${esc(d.archive.date)}</b> 档案（+${d.archive.added} / 更新 ${d.archive.updated}）` +
+        (d.archive.saved === false ? '。<b style="color:#ff8a8a">但当前存储不可持久化，重启后会丢失</b>' : '。')
       : '');
 
   const items = d.items || [];
@@ -1811,9 +1812,13 @@ function renderArchive() {
 
   const hint = $('#archive-hint');
   if (hint) {
-    hint.textContent = filtered
+    const base = filtered
       ? `筛选 ${shown} 条 / 共 ${t.records || 0} 条`
       : `收录评分 ≥ ${d.minScore ?? 65} 分 · 共 ${t.records || 0} 条${d.auto ? ' · 扫描后自动存档' : ' · 自动存档已关闭'}`;
+    const store = d.storage === 'upstash'
+      ? (d.persisted === false ? ' · ⚠ 云端存储异常' : ' · ☁ 云端持久化')
+      : (d.persisted === false ? ' · ⚠ 临时存储，重启会丢' : ' · 💾 本地文件');
+    hint.textContent = base + store;
   }
 
   if (!(d.months || []).length) {

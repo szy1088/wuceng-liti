@@ -1,0 +1,8 @@
+# Vercel CLI 部署时不要上传本地运行数据。
+# data/ 里有推送密钥（Server酱 SendKey、企业微信 webhook），绝不能进部署包。
+data/
+logs/
+__pycache__/
+*.log
+*.pid
+*.docx

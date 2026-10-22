@@ -90,11 +90,44 @@ Windows 上也可以直接双击 `start.ps1`，它会自动选一个可用的 Py
 
 - 闲置 **15 分钟休眠**，下次访问约 **1 分钟冷启动**（这是所有免费方案的共同代价）；
 - 磁盘是**临时的**，服务重启后 `data/store.json` 恢复默认值（页面上会明确提示）；
+  要真正持久化，见下面的 [Upstash Redis 方案](#让数据真正存下来upstash-redis可选)；
 - 每月 750 实例小时，个人用绰绰有余。
 
 > 其他平台的免费层现状：Fly.io 已改为需要信用卡、Koyeb 缩水成 scale-to-zero、
 > Railway 只剩每月 $1 额度、Heroku 早在 2022 年就取消了免费层。
 > **不需要信用卡、还能跑长驻进程的，基本只剩 Render。**
+
+### 让数据真正存下来（Upstash Redis，可选）
+
+Render / Vercel 免费实例的磁盘都是**临时**的：冷启动、重启、重新部署会把
+`data/store.json` 清空。Vercel 更麻烦 —— 同一时刻会跑多个互相隔离的实例，
+每个实例各有一份磁盘，请求打到哪个实例就看到哪份数据，所以档案会「时有时无」。
+
+要让档案、自选、持仓、复盘跨重启保留，配一个免费的
+[Upstash Redis](https://console.upstash.com/) 即可（不需要信用卡）：
+
+1. 在 Upstash 控制台建一个免费 Redis 数据库；
+2. 复制 **REST URL** 和 **REST TOKEN**；
+3. 在部署平台（Vercel / Render）加两个环境变量：
+
+| 变量 | 值 |
+| --- | --- |
+| `UPSTASH_REDIS_REST_URL` | `https://xxx.upstash.io` |
+| `UPSTASH_REDIS_REST_TOKEN` | 控制台里的 REST Token |
+
+也兼容 Vercel 市场集成自动注入的 `KV_REST_API_URL` / `KV_REST_API_TOKEN`。
+
+配好后 `server.py` 会自动切换存储：元数据存 `<前缀>meta`，档案按月存
+`<前缀>archive:YYYY-MM`（gzip + base64 压缩，单月通常只有十几 KB），
+本地 `data/store.json` 继续作为离线备份。**没配这两个变量时行为完全不变**，
+本地开发仍然是纯文件存储。
+
+> 多套环境（本地 / Vercel / Render）共用一个库时，给其中一套设
+> `LHT_KV_PREFIX=lht:dev:` 就能隔离数据。
+> 公网实例的 `/api/store` 是**公开可读**的，不要在云端填推送密钥、持仓等个人数据。
+
+档案页顶部会显示当前存储状态：`☁ 云端持久化` / `💾 本地文件` /
+`⚠ 临时存储，重启会丢`，一眼就能确认有没有生效。
 
 ### 部署之后：消灭那 1 分钟冷启动
 

@@ -31,7 +31,9 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as _dt
+import gzip
 import json
 import os
 import re
@@ -73,6 +75,27 @@ CORS_ORIGIN = os.environ.get("LHT_CORS_ORIGIN", "").strip()
 
 # Free 实例的磁盘是临时的：配置存不下去时降级运行，不让接口 500。
 DATA_WRITABLE = True
+
+# ----------------------------------------------------------------------------
+# 可选：Upstash Redis 持久化
+# ----------------------------------------------------------------------------
+# Vercel / Render 免费实例的本地磁盘都是临时的：冷启动、扩缩容、重新部署都会
+# 把 data/store.json 清空。Vercel 更麻烦 —— 同一时刻多个实例各有一份磁盘，
+# 请求打到哪个实例就看到哪份数据，所以「档案」会时有时无。
+#
+# 配了下面两个环境变量后，store 会改存到 Upstash（Redis 的 REST 接口），
+# 本地文件只作为离线备份；没配则保持原来的纯本地行为。
+#
+# 兼容两种命名：
+#   UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN   （Upstash 控制台）
+#   KV_REST_API_URL / KV_REST_API_TOKEN                 （Vercel KV / 市场集成自动注入）
+_KV_URL = (os.environ.get("UPSTASH_REDIS_REST_URL")
+           or os.environ.get("KV_REST_API_URL") or "").strip().rstrip("/")
+_KV_TOKEN = (os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+             or os.environ.get("KV_REST_API_TOKEN") or "").strip()
+# 键前缀。多套环境共用同一个库时，用 LHT_KV_PREFIX 隔离（例如 lht:dev:）。
+_KV_PREFIX = (os.environ.get("LHT_KV_PREFIX") or "lht:").strip()
+_KV_ENABLED = bool(_KV_URL and _KV_TOKEN)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1894,37 +1917,144 @@ _DEFAULT_STORE = {
 _STORE_LOCK = threading.RLock()
 
 
+def _normalize_store(data: dict) -> dict:
+    """把磁盘 / Redis 读到的原始结构补齐成前端期望的 store。"""
+    data = data if isinstance(data, dict) else {}
+    merged = dict(_DEFAULT_STORE)
+    merged.update(data)
+    raw = dict(data.get("settings") or {})
+    if "notifyChannels" not in raw:
+        # 旧版是单通道（notifyChannel / notifyKey），升级成列表 + 字典。
+        # 只在「存储里还没有新字段」时迁移，这样用户清空勾选后不会被旧值复活。
+        ch = str(raw.get("notifyChannel") or "off").strip().lower()
+        key = str(raw.get("notifyKey") or "").strip()
+        live = ch not in ("", "off", "none") and bool(key)
+        raw["notifyChannels"] = [ch] if live else []
+        raw["notifyKeys"] = {ch: key} if live else {}
+    merged["settings"] = {**DEFAULT_SETTINGS, **raw}
+    merged["persisted"] = DATA_WRITABLE
+    return merged
+
+
+# --- Upstash REST 读写 ------------------------------------------------------
+# 为什么不直接用 redis-py：本项目坚持零第三方依赖，而 Upstash 的 REST 接口
+# 用标准库 urllib 就能调用。所有命令都走根路径的 POST（命令数组），
+# 这样 GET / SET / KEYS / DEL 不需要分别记一套 URL 规则。
+
+def _kv_cmd(*args, timeout: float = 8.0):
+    body = json.dumps(list(args), ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        _KV_URL, data=body, method="POST",
+        headers={
+            "Authorization": "Bearer " + _KV_TOKEN,
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if isinstance(payload, dict) and payload.get("error"):
+        raise RuntimeError("Upstash: %s" % payload["error"])
+    return payload.get("result") if isinstance(payload, dict) else payload
+
+
+def _kv_encode(value) -> str:
+    """JSON → gzip → base64。档案里 K 线快照很占空间，压缩后通常只剩 1/5。"""
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return "gz:" + base64.b64encode(gzip.compress(raw, 6)).decode("ascii")
+
+
+def _kv_decode(text):
+    if text is None:
+        return None
+    text = str(text)
+    if text.startswith("gz:"):
+        return json.loads(gzip.decompress(base64.b64decode(text[3:])).decode("utf-8"))
+    return json.loads(text)
+
+
+def _kv_meta_key() -> str:
+    return _KV_PREFIX + "meta"
+
+
+def _kv_archive_prefix() -> str:
+    return _KV_PREFIX + "archive:"
+
+
+def _kv_load_cloud():
+    """从 Redis 读回完整 store；键不存在（空库）时返回 None。"""
+    meta = _kv_decode(_kv_cmd("GET", _kv_meta_key()))
+    if not isinstance(meta, dict):
+        return None
+    archive = {}
+    prefix = _kv_archive_prefix()
+    for key in _kv_cmd("KEYS", prefix + "*") or []:
+        if not isinstance(key, str) or not key.startswith(prefix):
+            continue
+        month = key[len(prefix):]
+        if not month:
+            continue
+        part = _kv_decode(_kv_cmd("GET", key))
+        if isinstance(part, dict):
+            archive[month] = part
+    return {"meta": meta, "archive": archive}
+
+
+def _kv_save_cloud(meta: dict, archive: dict) -> None:
+    """元数据存一个键，档案按月各存一个键，并清掉已删除的月份。"""
+    clean_meta = {k: v for k, v in meta.items()
+                  if k not in ("persisted", "dragonArchive")}
+    _kv_cmd("SET", _kv_meta_key(), _kv_encode(clean_meta))
+
+    prefix = _kv_archive_prefix()
+    old_keys = set(_kv_cmd("KEYS", prefix + "*") or [])
+    for month, month_map in (archive or {}).items():
+        key = prefix + str(month)
+        _kv_cmd("SET", key, _kv_encode(month_map))
+        old_keys.discard(key)
+    for key in old_keys:
+        _kv_cmd("DEL", key)
+
+
+def _load_local_store():
+    """读本地 data/store.json；不存在或损坏时返回 None。"""
+    try:
+        if os.path.exists(STORE_FILE):
+            # utf-8-sig：用户手工改 store.json（或用 PowerShell 生成）时很容易带上 BOM，
+            # 用纯 "utf-8" 读会让 json.load 直接抛异常，于是整个配置被静默重置成默认值
+            # （推送密钥、持仓、复盘全"丢"）。utf-8-sig 读没有 BOM 的文件也完全正常。
+            with open(STORE_FILE, "r", encoding="utf-8-sig") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:                            # noqa: BLE001
+        _note_error(exc)
+    return None
+
+
 def load_store() -> dict:
+    global DATA_WRITABLE
     with _STORE_LOCK:
-        try:
-            if os.path.exists(STORE_FILE):
-                # utf-8-sig：用户手工改 store.json（或用 PowerShell 生成）时很容易带上 BOM，
-                # 用纯 "utf-8" 读会让 json.load 直接抛异常，于是整个配置被静默重置成默认值
-                # （推送密钥、持仓、复盘全"丢"）。utf-8-sig 读没有 BOM 的文件也完全正常。
-                with open(STORE_FILE, "r", encoding="utf-8-sig") as fh:
-                    data = json.load(fh)
-                merged = dict(_DEFAULT_STORE)
-                merged.update(data)
-                raw = dict(data.get("settings") or {})
-                if "notifyChannels" not in raw:
-                    # 旧版是单通道（notifyChannel / notifyKey），升级成列表 + 字典。
-                    # 只在「存储里还没有新字段」时迁移，这样用户清空勾选后不会被旧值复活。
-                    ch = str(raw.get("notifyChannel") or "off").strip().lower()
-                    key = str(raw.get("notifyKey") or "").strip()
-                    live = ch not in ("", "off", "none") and bool(key)
-                    raw["notifyChannels"] = [ch] if live else []
-                    raw["notifyKeys"] = {ch: key} if live else {}
-                merged["settings"] = {**DEFAULT_SETTINGS, **raw}
-                merged["persisted"] = DATA_WRITABLE
-                return merged
-        except Exception as exc:                        # noqa: BLE001
-            _note_error(exc)
-        fallback = dict(_DEFAULT_STORE)
-        fallback["persisted"] = DATA_WRITABLE
-        return fallback
+        if _KV_ENABLED:
+            try:
+                cloud = _kv_load_cloud()
+                DATA_WRITABLE = True
+                if cloud is not None:
+                    data = dict(cloud["meta"])
+                    data["dragonArchive"] = cloud["archive"]
+                    return _normalize_store(data)
+                # 空库：允许第一次用本地文件里的数据做迁移（Vercel 上通常没有）。
+            except Exception as exc:                    # noqa: BLE001
+                _note_error(exc)
+                DATA_WRITABLE = False
+
+        data = _load_local_store()
+        if data is None:
+            data = {}
+        return _normalize_store(data)
 
 
 def save_store(payload: dict) -> dict:
+    global DATA_WRITABLE
     with _STORE_LOCK:
         current = load_store()
         for key in ("watchlist", "positions", "reviews", "trades", "dragonArchive"):
@@ -1939,18 +2069,33 @@ def save_store(payload: dict) -> dict:
                 if value is not None:
                     merged[key] = value
             current["settings"] = merged
-        global DATA_WRITABLE
+
+        # 本地文件始终写成一份备份（本地开发时它就是主存储；云端只读时忽略失败）。
+        local_ok = False
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(STORE_FILE, "w", encoding="utf-8") as fh:
                 json.dump(current, fh, ensure_ascii=False, indent=2)
-            DATA_WRITABLE = True
+            local_ok = True
         except OSError as exc:
-            # 云端免费实例的磁盘可能是只读的、或者重启后就清空。存不下去不该让接口 500，
-            # 降级成「本次运行内有效」，并把这个事实告诉前端（页面会提示）。
-            if DATA_WRITABLE:
+            if not _KV_ENABLED:
+                if DATA_WRITABLE:
+                    _note_error(exc)
+                DATA_WRITABLE = False
+
+        if _KV_ENABLED:
+            try:
+                _kv_save_cloud(
+                    {k: v for k, v in current.items() if k != "persisted"},
+                    current.get("dragonArchive") or {},
+                )
+                DATA_WRITABLE = True
+            except Exception as exc:                    # noqa: BLE001
                 _note_error(exc)
-            DATA_WRITABLE = False
+                DATA_WRITABLE = False
+        else:
+            DATA_WRITABLE = local_ok
+
         current["persisted"] = DATA_WRITABLE
         return current
 
@@ -2219,6 +2364,10 @@ def api_archive() -> dict:
         "generatedAt": _archive_stamp(),
         "minScore": _archive_int(settings.get("archiveMinScore"), 65),
         "auto": bool(settings.get("archiveAuto", True)),
+        # 前端用它告诉用户「这份档案到底存哪儿了」：
+        # upstash = 云端持久化；file = 本地文件；persisted=False = 临时存储，重启会丢。
+        "storage": "upstash" if _KV_ENABLED else "file",
+        "persisted": bool(store.get("persisted", DATA_WRITABLE)),
         "totals": {
             "months": len(months),
             "days": total_days,
