@@ -14,6 +14,10 @@ name: 开盘前自动唤醒线上实例
 #      所以它只适合兜底，别当成精确的闹钟。
 #   2. 仓库连续 60 天没有任何提交活动，GitHub 会自动停掉定时任务。
 #      随便推一次提交就能重新激活。
+#
+# 另外还有一个每日任务：访问一次 Vercel 的 /api/archive。
+# 目的是让 Upstash 免费库至少每天收到一条读命令，避免连续 30 天闲置被归档。
+# 它不依赖 Render 是否在线，成本只有每天 3 条起的 Redis 命令。
 
 on:
   schedule:
@@ -22,6 +26,8 @@ on:
     # 用 5,15,25,... 而不是 */10，是为了避开整点 ——
     # 整点是 GitHub 最拥堵、定时任务最容易被延迟的时刻。
     - cron: '5,15,25,35,45,55 1-7 * * 1-5'
+    # 每天 UTC 00:17（北京时间 08:17）戳一次档案接口，保持 Upstash 活跃。
+    - cron: '17 0 * * *'
   workflow_dispatch:
 
 permissions:
@@ -29,6 +35,8 @@ permissions:
 
 jobs:
   keepalive:
+    # 每日档案保活那一次不叫醒 Render，避免白白消耗免费实例小时。
+    if: github.event.schedule != '17 0 * * *'
     runs-on: ubuntu-latest
     steps:
       - name: 唤醒线上实例并确认存活
@@ -47,4 +55,19 @@ jobs:
           # 故意 exit 0：这里没醒不代表出错，只是「下次打开要多等一会儿」。
           # 如果 exit 1，仓库上会挂一片红叉并给你发失败邮件，纯属制造焦虑。
           echo "三次都没等到 200。不影响使用，只是下次打开可能要等冷启动。"
+          exit 0
+
+  # 每天一次，专门给 Upstash 发一条读命令。
+  # Vercel 常驻在线，不用担心冷启动；/api/archive 会 load_store()，
+  # 配了 Redis 就会产生 GET + KEYS + 每月 GET（至少 3 条命令），足够算作「有活动」。
+  archive-keepalive:
+    if: github.event.schedule == '17 0 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 保持云端档案库活跃
+        run: |
+          URL="https://wuceng-liti.vercel.app/api/archive"
+          code=$(curl -s -o /tmp/archive -w '%{http_code}' --max-time 60 "$URL" || echo 000)
+          echo "HTTP $code  $(head -c 120 /tmp/archive 2>/dev/null)"
+          # 失败也 exit 0：保活任务本身不该制造红叉和失败邮件。
           exit 0
